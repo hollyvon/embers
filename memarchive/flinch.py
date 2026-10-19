@@ -49,7 +49,7 @@ class Thresholds:
     median_low_frac: float = 0.4           # the low fence is never tighter than median * this
     median_high_mult: float = 3.0          # the high fence is never tighter than median * this
     default_fences: Dict[str, Tuple[float, float]] = field(default_factory=lambda: dict(DEFAULT_FENCES))
-    min_source_bytes: int = 1500           # below this the ratio is not meaningful and the check passes
+    min_source_bytes: int = 3000           # below this the ratio is not meaningful and the check passes (raised from 1500: real 2-3 KB leaves drew "too long" verdicts on honest summaries)
     # evasion check
     markers: Tuple[str, ...] = EVASION_MARKERS
     benign: Tuple[str, ...] = EVASION_BENIGN

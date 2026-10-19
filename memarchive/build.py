@@ -9,13 +9,14 @@ from __future__ import annotations
 import dataclasses
 import json
 import sqlite3
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import dag
 from .dag import LEVELS, READY, PROSE_CLASSES
 from .flinch import Baseline, FlinchReport, baseline_for_level, evaluate, extract_proper_nouns
 from .ingest import now_iso
-from .summarize import BudgetExceeded, PromptPack, SummaryResult, Summarizer, PRICES, UNKNOWN_PRICE
+from .summarize import FALLBACK_TIER, BudgetExceeded, PromptPack, SummaryResult, Summarizer, PRICES, UNKNOWN_PRICE
 
 NOISE_CLASSES = ("tool_use", "tool_result", "attachment", "system", "summary")
 NOISE_PREVIEW = 120
@@ -113,6 +114,7 @@ class BuildOptions:
     chunk_bytes: int = dag.DEFAULT_CHUNK_BYTES
     limit: int = 0
     dry_run: bool = False
+    workers: int = 1           # concurrent summarizer calls within a level (network-bound; SQLite stays single-writer)
 
 
 def _pending(conn: sqlite3.Connection, level: str, scope: Optional[List[str]]) -> List[sqlite3.Row]:
@@ -142,55 +144,182 @@ def _store(conn: sqlite3.Connection, node: sqlite3.Row, pack: PromptPack, res: S
         conn.execute("INSERT INTO nodes_fts(node_id, summary) VALUES (?, ?)", (node["id"], res.text))
 
 
+def set_manual_summary(conn: sqlite3.Connection, node: sqlite3.Row, text: str) -> None:
+    """Store an operator-written summary: backend `manual`, model `human`, status `ok`, indexed in nodes_fts.
+    The metrics (report, earlier history) are kept and a {"tier": "manual"} entry is appended. Ancestors built
+    over this node's placeholder are rebuilt by the next `mem build` (their child signature changes)."""
+    text = text.strip()
+    if not text:
+        raise ValueError("empty summary")
+    meta = json.loads(node["metrics_json"] or "{}")
+    nbytes = len(text.encode("utf-8"))
+    meta["history"] = (meta.get("history") or []) + [{"tier": "manual", "model": "human", "summary_bytes": nbytes,
+                                                      "failed": [], "detail": {}, "evasion_hits": None}]
+    meta["manual"] = True
+    conn.execute("""UPDATE nodes SET summary=?, summary_bytes=?, model='human', backend='manual', status='ok',
+                    metrics_json=?, created_at=? WHERE id=?""", (text, nbytes, json.dumps(meta), now_iso(), node["id"]))
+    conn.execute("DELETE FROM nodes_fts WHERE node_id = ?", (node["id"],))
+    conn.execute("INSERT INTO nodes_fts(node_id, summary) VALUES (?, ?)", (node["id"], text))
+
+
+@dataclasses.dataclass
+class _Job:
+    """One node moving through its attempts. Owned by the main thread; workers only see snapshots."""
+    node: sqlite3.Row
+    pack: PromptPack
+    kids: Optional[List[sqlite3.Row]]
+    failures: int
+    history: List[Dict[str, Any]]
+
+
 class Builder:
-    def __init__(self, conn: sqlite3.Connection, summarizer: Summarizer, log: Callable[[str], None] = lambda s: None):
+    """Escalation per node: small tier (leaf) / mid (upper) -> rerun tier -> (only if the rerun was refused)
+    small tier at effort medium -> manual. Every outcome is committed by the MAIN thread; worker threads
+    only call `summarizer.summarize()` and `flinch.evaluate()`, so SQLite has a single writer and an
+    interruption leaves finished nodes stored and unfinished ones untouched."""
+
+    def __init__(self, conn: sqlite3.Connection, summarizer: Summarizer, log: Callable[[str], None] = lambda s: None,
+                 workers: int = 1):
         self.conn = conn
         self.summarizer = summarizer
         self.log = log
+        self.workers = max(1, int(workers or 1))
         self._baselines: Dict[str, Optional[Baseline]] = {}
         self._since: Dict[str, int] = {}
 
     def baseline(self, level: str) -> Optional[Baseline]:
+        """Read from the DB (main thread) once per batch of 25 accepted nodes, not per node."""
         n = self._since.get(level, 10 ** 9)
         if level not in self._baselines or n >= 25:
             self._baselines[level] = baseline_for_level(self.conn, level)
             self._since[level] = 0
         return self._baselines[level]
 
-    def process(self, node: sqlite3.Row, pack: PromptPack, kids: Optional[List[sqlite3.Row]]) -> Tuple[str, int]:
-        """Summarize one node: first attempt (small tier for leaves, mid above), one rerun on mid if the
-        flinch detector rejects it, then manual. Each outcome is committed, so an interruption between
-        the attempts leaves the node `flagged` and the next build goes straight to the rerun.
-        Returns (final status, number of rejected summaries)."""
-        conn = self.conn
-        failures = node["attempts"]
-        history: List[Dict[str, Any]] = json.loads(node["metrics_json"] or "{}").get("history", []) if failures else []
-        for attempt in range(min(failures, 1), 2):
-            tier = "small" if (attempt == 0 and node["level"] == "leaf") else "mid"
-            p = pack
-            if history:
-                p = dataclasses.replace(pack, feedback="it failed the quality checks (%s); cover every concrete name, "
-                                                       "decision and event, and do not omit or soften anything."
-                                                       % ", ".join(history[-1].get("failed") or ["?"]))
-            res = self.summarizer.summarize(p, tier)
-            report = evaluate(res.text, level=node["level"], source_bytes=pack.source_bytes,
-                              proper_nouns=pack.proper_nouns, sensitivity=pack.sensitivity,
-                              baseline=self.baseline(node["level"]), source_text=pack.text)
-            history.append({"tier": tier, "model": res.model, "summary_bytes": len(res.text.encode("utf-8")),
-                            "failed": report.failed, "detail": res.detail,
-                            "evasion_hits": next((c.detail.get("hits") for c in report.checks if c.name == "evasion"), None)})
-            if report.passed:
-                _store(conn, node, pack, res, "ok", failures, report, history, kids)
-                self._since[node["level"]] = self._since.get(node["level"], 0) + 1
-                conn.commit()
-                return "ok", failures
-            failures += 1
-            status = "manual" if attempt == 1 else "flagged"
-            _store(conn, node, pack, res, status, failures, report, history, kids)
+    # ---- the pieces
+    def _tier(self, level: str, step: int) -> str:
+        if step <= 0:
+            return "small" if level == "leaf" else "mid"
+        if step == 1:
+            return self.summarizer.rerun_tier(level)
+        return FALLBACK_TIER
+
+    def _attempt(self, job_pack: PromptPack, node_level: str, tier: str,
+                 baseline: Optional[Baseline]) -> Tuple[SummaryResult, FlinchReport]:
+        """WORKER THREAD. No database access."""
+        res = self.summarizer.summarize(job_pack, tier)
+        report = evaluate(res.text, level=node_level, source_bytes=job_pack.source_bytes,
+                          proper_nouns=job_pack.proper_nouns, sensitivity=job_pack.sensitivity,
+                          baseline=baseline, source_text=job_pack.text)
+        return res, report
+
+    def _submit(self, ex: ThreadPoolExecutor, inflight: Dict[Any, Tuple[_Job, int, str]], job: _Job) -> None:
+        step = min(job.failures, 2)
+        tier = self._tier(job.node["level"], step)
+        p = job.pack
+        if job.history:
+            p = dataclasses.replace(p, feedback="it failed the quality checks (%s); cover every concrete name, "
+                                                "decision and event, and do not omit or soften anything."
+                                                % ", ".join(job.history[-1].get("failed") or ["?"]))
+        fut = ex.submit(self._attempt, p, job.node["level"], tier, self.baseline(job.node["level"]))
+        inflight[fut] = (job, step, tier)
+
+    def _apply(self, job: _Job, step: int, tier: str, res: SummaryResult, report: FlinchReport) -> str:
+        """MAIN THREAD. Record the attempt, store and commit. Returns ok | flagged (rerun pending) | manual."""
+        node, conn = job.node, self.conn
+        entry: Dict[str, Any] = {
+            "tier": tier, "model": res.model, "summary_bytes": len(res.text.encode("utf-8")),
+            "failed": report.failed, "detail": res.detail,
+            "evasion_hits": next((c.detail.get("hits") for c in report.checks if c.name == "evasion"), None)}
+        if step >= 2:
+            entry.update(effort="medium", reason="rerun refused; one more try on the small tier at effort medium")
+        if res.refused:
+            entry["refused"] = True
+        job.history.append(entry)
+        if report.passed:
+            _store(conn, node, job.pack, res, "ok", job.failures, report, job.history, job.kids)
+            self._since[node["level"]] = self._since.get(node["level"], 0) + 1
             conn.commit()
-            self.log("%s %s %s: failed %s" % (node["level"], node["id"], "-> manual" if status == "manual" else
-                                              "-> rerun on mid", ",".join(report.failed)))
-        return "manual", failures
+            return "ok"
+        job.failures += 1
+        if step == 0:
+            status = "flagged"
+        elif step == 1 and res.refused:
+            status = "flagged"
+            entry["note"] = "refused; next try: small tier at effort medium"
+        else:
+            status = "manual"
+        _store(conn, node, job.pack, res, status, job.failures, report, job.history, job.kids)
+        conn.commit()
+        self.log("%s %s %s: failed %s" % (node["level"], node["id"],
+                 "-> manual" if status == "manual" else "-> rerun on " + self._tier(node["level"], job.failures),
+                 ",".join(report.failed)))
+        return status
+
+    # ---- one level
+    def run_level(self, level: str, pending: List[sqlite3.Row], remaining: Optional[int],
+                  lv: Dict[str, int], out: Dict[str, Any]) -> int:
+        """Build `pending` with up to `self.workers` calls in flight. Returns the number of nodes started.
+        Sets out['stopped'] to 'limit' or 'budget' when it stops early. A worker exception stops dispatch,
+        lets the calls already in flight finish and be stored, then re-raises (the failed node stays as it was)."""
+        conn = self.conn
+        nodes = iter(pending)
+        inflight: Dict[Any, Tuple[_Job, int, str]] = {}
+        started = 0
+        exhausted = False
+        first_exc: Optional[BaseException] = None
+        ex = ThreadPoolExecutor(max_workers=self.workers)
+        try:
+            while True:
+                while not out["stopped"] and first_exc is None and not exhausted and len(inflight) < self.workers:
+                    node = next(nodes, None)
+                    if node is None:
+                        exhausted = True
+                        break
+                    if remaining is not None and started >= remaining:
+                        out["stopped"] = "limit"
+                        break
+                    pack = make_pack(conn, node)
+                    if pack is None:
+                        lv["not_ready"] += 1
+                        out["not_ready"] += 1
+                        continue
+                    kids = children_of(conn, node["id"]) if level != "leaf" else None
+                    failures = node["attempts"]
+                    history = json.loads(node["metrics_json"] or "{}").get("history", []) if failures else []
+                    self._submit(ex, inflight, _Job(node, pack, kids, failures, history))
+                    started += 1
+                if not inflight:
+                    break
+                done, _ = wait(list(inflight), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    job, step, tier = inflight.pop(fut)
+                    try:
+                        res, report = fut.result()
+                    except BudgetExceeded as e:
+                        out["stopped"], out["stop_reason"] = "budget", str(e)      # node untouched: still pending/flagged
+                        continue
+                    except Exception as e:                                          # noqa: BLE001
+                        first_exc = first_exc or e
+                        continue
+                    status = self._apply(job, step, tier, res, report)
+                    if status == "flagged":
+                        if out["stopped"] != "budget" and first_exc is None:
+                            self._submit(ex, inflight, job)
+                        continue                                                    # else left flagged: next build resumes it
+                    lv[status] += 1
+                    out["built"] += 1 if status == "ok" else 0
+                    out["manual"] += 1 if status == "manual" else 0
+                    if status == "ok" and job.failures:
+                        out["flagged_then_ok"] += 1
+        except BaseException:
+            # Ctrl-C or an unexpected error in the main thread: stop everything not yet running, keep what is stored.
+            ex.shutdown(wait=False, cancel_futures=True)
+            conn.rollback()
+            raise
+        ex.shutdown(wait=True)
+        if first_exc is not None:
+            raise first_exc
+        return started
 
 
 def run_build(conn: sqlite3.Connection, summarizer: Summarizer, opts: BuildOptions,
@@ -202,42 +331,21 @@ def run_build(conn: sqlite3.Connection, summarizer: Summarizer, opts: BuildOptio
     scope = opts.thread_ids
     sync = dag.sync_structure(conn, opts.chunk_bytes, scope, months=scope is None)
     out: Dict[str, Any] = {"sync": sync, "levels": {}, "built": 0, "flagged_then_ok": 0, "manual": 0,
-                           "not_ready": 0, "stopped": None, "dry_run": opts.dry_run}
+                           "not_ready": 0, "stopped": None, "dry_run": opts.dry_run, "workers": max(1, opts.workers)}
     if opts.dry_run:
         out["plan"] = plan_stats(conn, opts.levels, scope, summarizer)
         conn.rollback()
         return out
     conn.commit()
-    b = Builder(conn, summarizer, log)
+    b = Builder(conn, summarizer, log, workers=opts.workers)
     done = 0
-    try:
-        for level in LEVELS:
-            if level not in opts.levels:
-                continue
-            lv = out["levels"].setdefault(level, {"ok": 0, "manual": 0, "not_ready": 0})
-            for node in _pending(conn, level, scope):
-                if opts.limit and done >= opts.limit:
-                    out["stopped"] = "limit"
-                    raise StopIteration
-                pack = make_pack(conn, node)
-                if pack is None:
-                    lv["not_ready"] += 1
-                    out["not_ready"] += 1
-                    continue
-                kids = children_of(conn, node["id"]) if level != "leaf" else None
-                status, failures = b.process(node, pack, kids)
-                done += 1
-                lv[status] += 1
-                out["built"] += 1 if status == "ok" else 0
-                out["manual"] += 1 if status == "manual" else 0
-                if status == "ok" and failures:
-                    out["flagged_then_ok"] += 1
-    except StopIteration:
-        pass
-    except BudgetExceeded as e:
-        conn.rollback()
-        out["stopped"] = "budget"
-        out["stop_reason"] = str(e)
+    for level in LEVELS:                      # a level starts only when every node of the one below has finished
+        if level not in opts.levels:
+            continue
+        lv = out["levels"].setdefault(level, {"ok": 0, "manual": 0, "not_ready": 0})
+        done += b.run_level(level, _pending(conn, level, scope), (opts.limit - done) if opts.limit else None, lv, out)
+        if out["stopped"]:
+            break
     out["spent_usd"] = round(getattr(summarizer, "spent_usd", 0.0), 6)
     return out
 

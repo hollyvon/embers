@@ -28,7 +28,7 @@ Tests: `pytest`.
 mem ingest ~/.claude/projects <second-root> --index <sessions-index-dir>   # incremental; re-run any time
 mem search "exact phrase or fts AND query" --class human,assistant,thinking --since 2026-03-01 --limit 10
 mem session <id-or-prefix-or-window-number> [--around <hit-id>] [--thread] [--full]
-mem windows        # window map from [28] … / Context window #28 titles
+mem windows        # window map from [28] … / Context window #28 titles, sorted by date; untitled sessions show as (untitled)
 mem sessions       # list sessions
 mem stats
 ```
@@ -43,7 +43,7 @@ The database lives at `~/.memory-archive/mem.db` (override with `--db` or `$MEM_
 | `memarchive/records.py` | Pure record logic: block extraction and classes, the human-prompt predicate. |
 | `memarchive/ingest.py` | Incremental ingester, stitching, SQLite schema + FTS5. |
 | `memarchive/dag.py` | Layer D storage: node tables, leaf chunking, session/thread/month structure, staleness sync. |
-| `memarchive/build.py` | Prompt packs and the build loop (summarizer -> flinch detector -> accept / rerun / manual). |
+| `memarchive/build.py` | Prompt packs and the build loop (summarizer -> flinch detector -> accept / rerun / manual), the worker pool, manual entry. |
 | `memarchive/summarize.py` | `Summarizer` interface, offline `StubSummarizer`, budget-capped `AnthropicSummarizer`. |
 | `memarchive/flinch.py` | The summary-quality guard (three checks, `Thresholds`, `EVASION_MARKERS`). |
 | `memarchive/cli.py`, `mem` | The `mem` CLI. |
@@ -78,7 +78,7 @@ Tool noise (tool calls and results, attachments, system records) is not transcri
 mem build --dry-run                 # plan: nodes, source bytes, estimated tokens; writes nothing
 mem build --all --backend stub      # extractive stand-in summarizer, deterministic
 mem build --level leaf --limit 50   # or in slices; --thread ID scopes to one thread
-mem describe window 10              # summary at the window's altitude, children one per line
+mem describe window 10              # summary at the window's altitude, children one per line (also: "window 10", w10, 10)
 mem expand <node-id>                # one level down; at a leaf, the raw messages
 mem grep "some phrase" --level session
 mem flags                           # flagged / manual nodes with their detector metrics
@@ -96,10 +96,58 @@ mem build --all --backend anthropic --budget-usd 5
 ```
 
 - `--budget-usd` is mandatory for this backend (or `$MEM_BUDGET_USD`). Before every call the cost is estimated from the prompt size plus the maximum output; a call that could push spend past the budget is not made, the build stops cleanly (exit code 3), and the next run continues from there. Spend is computed from reported token usage. Nothing here enables overage; if you want a hard ceiling at the account level, set that in your Anthropic console too.
-- Two tiers: `small` for leaves, `mid` for session/thread/month nodes and for every rerun. Defaults are `claude-haiku-5-5` and `claude-sonnet-5-5`; override with `$MEM_MODEL_SMALL` / `$MEM_MODEL_MID`. Prices for the cost estimate live in `PRICES` in `memarchive/summarize.py`; an unlisted model is priced conservatively.
+- Two tiers: `small` for leaves, `mid` for session/thread/month nodes. Defaults are `claude-haiku-5-5` and `claude-sonnet-5-5`; override with `$MEM_MODEL_SMALL` / `$MEM_MODEL_MID`. The rerun tier is configured per level, see "Reruns, refusals" below. Prices for the cost estimate live in `PRICES` in `memarchive/summarize.py`; an unlisted model is priced conservatively.
 - A user-scoped key (`sk-ant-usr…`) must name a workspace on every call: set `$MEM_WORKSPACE_ID` to the workspace id (`wrkspc_…`, from the Console under Settings → Workspaces) and the backend sends it as the `anthropic-workspace-id` header. Workspace-scoped keys need nothing extra.
 - The SDK's own two retries apply; the tool adds none. Select the backend with `--backend` or `$MEM_BACKEND` (default `stub`).
 - The tests and the cloud never call this backend.
+
+### Concurrent builds
+
+```bash
+mem build --level leaf --workers 8              # or $MEM_WORKERS; default 1 = one call at a time
+```
+
+Summarizing is network-bound (about 9 s per leaf call on the small model), so a first pass over thousands of leaves takes hours at one call at a time. `--workers N` keeps up to N calls in flight within a level. Only the summarizer call and the flinch evaluation run in worker threads; SQLite has a single writer, the main thread, which stores and commits each node as it completes (completion order, one commit per attempt, exactly as with one worker). The ratio baseline is read from the database once per 25 accepted nodes, not per node.
+
+- A level starts only after every node of the level below it has finished, so session/thread/month nodes still wait for all their children. Upper levels use the workers too.
+- `--limit N` means at most N nodes are started and stored; calls already in flight finish their node first.
+- **Budget.** The Anthropic backend reserves the worst-case cost of a call under a lock before making it, so N calls in flight can never jointly exceed `--budget-usd`; the reservation is replaced by the real cost afterwards (or released if the call fails). Near the cap that is deliberately pessimistic: the build stops cleanly (exit code 3) a few calls early rather than late.
+- **Interruption.** Ctrl-C or an exception leaves the database consistent: finished nodes are stored, unfinished ones are untouched (still pending, or flagged awaiting their rerun) and the next run picks them up. After Ctrl-C, calls already on the wire run to completion in the background and their results are discarded, so the process may take a few seconds to exit. An exception in a worker stops new dispatch, lets the other in-flight calls finish and be stored, then re-raises; the failed node stays as it was.
+- Mind your account's rate limits: a high `--workers` can turn into SDK retries and 429s. Start with 4-8.
+
+The operator pattern for a first real run:
+
+```bash
+mem build --level leaf --workers 8 --limit 200 --backend anthropic --budget-usd 5   # a slice
+mem flags                                      # inspect what the detector flagged / sent to manual
+mem build --level leaf --workers 8 --limit 200 --backend anthropic --budget-usd 5   # continue (idempotent)
+# ... repeat, then the upper levels:
+mem build --all --workers 8 --backend anthropic --budget-usd 5
+```
+
+### Reruns, refusals and manual summaries
+
+A rejected first attempt is rerun once on the **rerun tier**, which is configurable per level. The default is the `mid` model for both; leaves can be pointed elsewhere, for example when the mid model refuses leaves that contain thinking blocks:
+
+| Level | Env | Flag |
+|---|---|---|
+| leaf | `MEM_MODEL_RERUN_LEAF` | `--rerun-model-leaf MODEL` |
+| session, thread, month | `MEM_MODEL_RERUN_UPPER` | `--rerun-model-upper MODEL` |
+
+The flag beats the env var. The tier and model of every attempt are recorded in the node's history (`mem flags --json`).
+
+If the rerun ends with `stop_reason=refusal`, that does not silently use up the node's second attempt: the refusal is recorded in the history (with its category), and the node gets **one more try on the small tier at effort `medium`** before it is marked `manual`. The history entry for that try says why (`reason: rerun refused ...`, `effort: medium`). A node therefore has at most three attempts, and the third only after a refused rerun. An interrupted build resumes at whichever attempt was next.
+
+```bash
+mem flags                                           # what needs a human, and why
+mem manual <node-id> --text "..."                   # enter the summary (or --file PATH, or --stdin)
+mem flags --export DIR                              # one <node-id>.md per flagged/manual node: span, metrics, raw source
+#   write DIR/<node-id>.summary.md for each one you want to resolve, then
+mem manual --import DIR                             # stores every <node-id>.summary.md
+mem build                                           # rebuilds the nodes above the ones you changed
+```
+
+`mem manual` works on any node, not only `manual` ones. It sets the summary, backend `manual`, model `human`, status `ok`, adds the text to the search index, keeps the metrics and history, and appends a `{"tier": "manual"}` history entry. Because the ancestors of a node that was `manual` were built over a "summary unavailable" placeholder, the next `mem build` sees the changed child and rebuilds them.
 
 ### The flinch detector
 
@@ -113,7 +161,7 @@ Small models sometimes refuse, soften or skip difficult source material instead 
 
 When the source contains a thinking block, the tighter `Thresholds.high_sensitivity()` set applies (coverage 75%, narrower ratio fences); the flag propagates up to every ancestor.
 
-A rejected summary marks the node `flagged` and is rerun once on the `mid` tier with a note saying what failed. A second rejection marks it `manual` and the build moves on; upper nodes then see "summary unavailable" for that part instead of the rejected text, and rejected text is never added to the search index.
+A rejected summary marks the node `flagged` and is rerun once on the rerun tier (default `mid`) with a note saying what failed. A second rejection (after the refusal fallback described above, if it applies) marks it `manual` and the build moves on; upper nodes then see "summary unavailable" for that part instead of the rejected text, and rejected text is never added to the search index.
 
 Reading `mem flags`:
 
@@ -125,4 +173,4 @@ Lcf732936d079  leaf  manual  attempts=2  2026-03-15  sensitivity=high  threshold
     last output: ...
 ```
 
-Each line names a failed check with its score and the threshold it missed. `flagged` means a rerun is pending (an interrupted build); `manual` means both attempts failed and the node needs a human summary or a different model. `mem flags --json` gives the same data, and `mem expand <id>` shows the raw messages to summarize by hand.
+Each line names a failed check with its score and the threshold it missed. `flagged` means a rerun is pending (an interrupted build); `manual` means the attempts failed and the node needs a human summary or a different model. `mem flags --json` gives the same data, `mem flags --export DIR` writes the source next to the metrics for each node, and `mem expand <id>` shows the raw messages.
