@@ -167,9 +167,15 @@ SYSTEM_PROMPT = (
     "omit or moralize about difficult, sensitive or uncomfortable material: state it plainly and "
     "neutrally. Never refuse and never comment on the request itself. Text tagged [thinking] is the "
     "assistant's private reasoning; summarize it as faithfully as the rest. Lines starting with a dot are "
-    "tool activity that is listed rather than transcribed. Reply with the summary only: short bullet "
-    "points, no preamble."
+    "tool activity that is listed rather than transcribed. Refer to the people only by the names they are "
+    "addressed by or sign with IN THE TRANSCRIPT TEXT; never derive or guess a name from file paths, "
+    "usernames, email addresses or account identifiers, and if no name appears, write 'the user' and "
+    "'the assistant'. Reply with the summary only: short bullet points, no preamble."
 )
+# Optional operator-side hint, set locally, never committed: "MEM_PARTICIPANTS='Name1 (the user), Name2 (the assistant)'"
+_PARTICIPANTS = os.environ.get("MEM_PARTICIPANTS")
+if _PARTICIPANTS:
+    SYSTEM_PROMPT += " The participants are: %s." % _PARTICIPANTS
 LEVEL_HINT = {
     "leaf": "Summarize this stretch of one session.",
     "session": "Summarize this whole session from the summaries of its consecutive parts.",
@@ -196,7 +202,11 @@ class AnthropicSummarizer(Summarizer):
         self.calls = 0
         if client is None:
             import anthropic   # optional dependency: pip install anthropic
-            client = anthropic.Anthropic(max_retries=2)    # SDK-level retries only; none added here
+            headers = {}
+            ws = os.environ.get("MEM_WORKSPACE_ID")        # user-scoped keys must name a workspace
+            if ws:
+                headers["anthropic-workspace-id"] = ws
+            client = anthropic.Anthropic(max_retries=2, default_headers=headers or None)   # SDK retries only
         self.client = client
 
     @staticmethod

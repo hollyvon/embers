@@ -657,6 +657,14 @@ def cmd_build(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     budget = a.budget_usd if a.budget_usd is not None else (float(os.environ["MEM_BUDGET_USD"]) if os.environ.get("MEM_BUDGET_USD") else None)
     backend = a.backend or os.environ.get("MEM_BACKEND") or "stub"
     summarizer = make_summarizer(backend, budget_usd=budget)
+    if a.reset_backend:
+        ids = [r[0] for r in conn.execute("SELECT id FROM nodes WHERE backend = ?", (a.reset_backend,))]
+        if not a.dry_run:
+            for nid in ids:
+                dag.reset_pending(conn, nid)
+            conn.commit()
+        sys.stderr.write("reset %d node(s) built by backend %r to pending%s\n" % (len(ids), a.reset_backend,
+                         " (dry run: not written)" if a.dry_run else ""))
     scope = None
     if a.thread:
         rows = conn.execute("SELECT thread_id FROM threads WHERE thread_id = ? OR thread_id LIKE ?", (a.thread, a.thread + "%")).fetchall()
@@ -745,6 +753,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_stats)
 
     p = sub.add_parser("build", help="build the summary DAG (Layer D); idempotent")
+    p.add_argument("--reset-backend", metavar="NAME",
+                   help="first reset every node built by this backend (e.g. stub) to pending so this run replaces it")
     p.add_argument("--level", choices=list(dag.LEVELS) + ["all"], default="all")
     p.add_argument("--all", action="store_true", help="same as --level all")
     p.add_argument("--thread", help="only this thread id (or prefix); skips the month level")

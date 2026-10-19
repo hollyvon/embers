@@ -177,7 +177,8 @@ class Builder:
                               proper_nouns=pack.proper_nouns, sensitivity=pack.sensitivity,
                               baseline=self.baseline(node["level"]))
             history.append({"tier": tier, "model": res.model, "summary_bytes": len(res.text.encode("utf-8")),
-                            "failed": report.failed})
+                            "failed": report.failed, "detail": res.detail,
+                            "evasion_hits": next((c.detail.get("hits") for c in report.checks if c.name == "evasion"), None)})
             if report.passed:
                 _store(conn, node, pack, res, "ok", failures, report, history, kids)
                 self._since[node["level"]] = self._since.get(node["level"], 0) + 1

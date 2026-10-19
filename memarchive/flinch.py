@@ -166,7 +166,8 @@ def baseline_for_level(conn, level: str) -> Optional[Baseline]:
     """Median/IQR of summary_bytes/source_bytes over accepted nodes of this level, or None if there
     are none. (The 20-node minimum is applied by `check_ratio`.)"""
     rows = conn.execute("""SELECT summary_bytes * 1.0 / source_bytes FROM nodes
-                           WHERE level = ? AND status = 'ok' AND source_bytes > 0 AND summary_bytes > 0""",
+                           WHERE level = ? AND status = 'ok' AND source_bytes > 0 AND summary_bytes > 0
+                             AND backend IS NOT 'stub'""",
                         (level,)).fetchall()
     ratios = sorted(r[0] for r in rows)
     if not ratios:

@@ -97,6 +97,7 @@ mem build --all --backend anthropic --budget-usd 5
 
 - `--budget-usd` is mandatory for this backend (or `$MEM_BUDGET_USD`). Before every call the cost is estimated from the prompt size plus the maximum output; a call that could push spend past the budget is not made, the build stops cleanly (exit code 3), and the next run continues from there. Spend is computed from reported token usage. Nothing here enables overage; if you want a hard ceiling at the account level, set that in your Anthropic console too.
 - Two tiers: `small` for leaves, `mid` for session/thread/month nodes and for every rerun. Defaults are `claude-haiku-5-5` and `claude-sonnet-5-5`; override with `$MEM_MODEL_SMALL` / `$MEM_MODEL_MID`. Prices for the cost estimate live in `PRICES` in `memarchive/summarize.py`; an unlisted model is priced conservatively.
+- A user-scoped key (`sk-ant-usr…`) must name a workspace on every call: set `$MEM_WORKSPACE_ID` to the workspace id (`wrkspc_…`, from the Console under Settings → Workspaces) and the backend sends it as the `anthropic-workspace-id` header. Workspace-scoped keys need nothing extra.
 - The SDK's own two retries apply; the tool adds none. Select the backend with `--backend` or `$MEM_BACKEND` (default `stub`).
 - The tests and the cloud never call this backend.
 
