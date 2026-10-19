@@ -67,3 +67,29 @@ def db(corpus, tmp_path_factory):
     stats = Ingester(conn).ingest(corpus.roots, index_dir=corpus.index)
     yield DB(path, stats, conn)
     conn.close()
+
+
+# ----------------------------------------------------------------------------- Layer D helpers
+
+SMALL_THREAD = "29dec579"      # a two-session thread in the fixture corpus (small, so scoped builds are quick)
+
+
+def fresh_conn(corpus, tmp_path, name="mem.db"):
+    """A newly ingested Phase-1 DB (no Layer D tables yet)."""
+    conn = open_db(str(tmp_path / name))
+    Ingester(conn).ingest(corpus.roots, index_dir=corpus.index)
+    return conn
+
+
+@pytest.fixture(scope="session")
+def built(corpus, tmp_path_factory):
+    """The whole fixture corpus summarized with the stub backend."""
+    from memarchive.build import BuildOptions, run_build
+    from memarchive.summarize import StubSummarizer
+    path = tmp_path_factory.mktemp("built") / "mem.db"
+    conn = open_db(str(path))
+    Ingester(conn).ingest(corpus.roots, index_dir=corpus.index)
+    res = run_build(conn, StubSummarizer(), BuildOptions())
+    conn.commit()
+    yield DB(str(path), res, conn)
+    conn.close()

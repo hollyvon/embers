@@ -12,6 +12,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+anthropic = ["anthropic"]
 
 [project.scripts]
 mem = "memarchive.cli:main"
