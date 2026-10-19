@@ -67,7 +67,7 @@ def test_models_are_configurable_by_env_and_argument(monkeypatch):
 
 def test_budget_stops_before_a_call_that_could_exceed_it():
     fc = FakeClient(tout=4000)                        # ~110k input tokens (~$0.011) + 4k output (~$0.002) per call
-    s = AnthropicSummarizer(budget_usd=0.03, client=fc)
+    s = AnthropicSummarizer(budget_usd=0.03, client=fc, max_tokens=4096)   # the arithmetic below assumes a 4k cap
     done = 0
     with pytest.raises(BudgetExceeded):
         for _ in range(50):

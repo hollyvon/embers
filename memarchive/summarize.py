@@ -168,6 +168,16 @@ PRICES: Dict[str, Tuple[float, float]] = {
 UNKNOWN_PRICE = (10.00, 50.00)      # conservative for a model we have no price for
 DEFAULT_MODELS = {"small": "claude-haiku-5-5", "mid": "claude-sonnet-5-5"}
 EFFORT = {"small": "low", "mid": "medium", "rerun_leaf": "medium", "rerun_upper": "medium", "small_medium": "medium"}
+# Operator overrides: MEM_EFFORT_SMALL / MEM_EFFORT_MID (the mid value also covers the rerun tiers). On models whose
+# adaptive thinking spends from the output budget, 'low' on the upper tiers keeps long summaries from being cut off.
+if os.environ.get("MEM_EFFORT_SMALL"):
+    EFFORT["small"] = os.environ["MEM_EFFORT_SMALL"]
+if os.environ.get("MEM_EFFORT_MID"):
+    for _k in ("mid", "rerun_leaf", "rerun_upper"):
+        EFFORT[_k] = os.environ["MEM_EFFORT_MID"]
+
+# Hard word ceilings per level: a summary is an index, and past these lengths it stops being one.
+MAX_WORDS = {"leaf": 500, "session": 900, "thread": 900, "month": 1500}
 
 SYSTEM_PROMPT = (
     "You write faithful archival summaries of a person's private working transcripts with an AI "
@@ -251,7 +261,10 @@ class AnthropicSummarizer(Summarizer):
         return int(math.ceil(sum(len(t.encode("utf-8")) for t in texts) / 3.0))   # deliberately pessimistic
 
     def _user_prompt(self, pack: PromptPack) -> str:
-        parts = [LEVEL_HINT.get(pack.level, "Summarize this."), "Aim for roughly 10-20% of the source length."]
+        cap = MAX_WORDS.get(pack.level, 900)
+        parts = [LEVEL_HINT.get(pack.level, "Summarize this."),
+                 "Aim for roughly 10-20%% of the source length and NEVER exceed %d words: if the material is large, "
+                 "raise the altitude (group, do not enumerate) rather than run long." % cap]
         if pack.proper_nouns:
             parts.append("Names that must appear if they matter: " + ", ".join(pack.proper_nouns[:30]) + ".")
         if pack.feedback:

@@ -221,9 +221,16 @@ class Builder:
         tier = self._tier(job.node["level"], step)
         p = job.pack
         if job.history:
-            p = dataclasses.replace(p, feedback="it failed the quality checks (%s); cover every concrete name, "
-                                                "decision and event, and do not omit or soften anything."
-                                                % ", ".join(job.history[-1].get("failed") or ["?"]))
+            if "truncated" in (job.history[-1].get("failed") or []):
+                from .summarize import MAX_WORDS
+                p = dataclasses.replace(p, feedback="it was CUT OFF by the output length limit. Write at most %d words "
+                                                    "this time: raise the altitude, group rather than enumerate, keep "
+                                                    "every concrete name that matters."
+                                                    % MAX_WORDS.get(job.node["level"], 900))
+            else:
+                p = dataclasses.replace(p, feedback="it failed the quality checks (%s); cover every concrete name, "
+                                                    "decision and event, and do not omit or soften anything."
+                                                    % ", ".join(job.history[-1].get("failed") or ["?"]))
         fut = ex.submit(self._attempt, p, job.node["level"], tier, self.baseline(job.node["level"]))
         inflight[fut] = (job, step, tier)
 
