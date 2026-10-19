@@ -174,7 +174,7 @@ def parse_window(title: Optional[str]) -> Optional[int]:
 
 
 def now_iso() -> str:
-    return _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def default_db_path() -> str:
@@ -299,7 +299,8 @@ class Ingester:
                 stats.bump("files_unchanged")
                 return
             if st.st_size >= row["size"] and row["parsed_bytes"] <= st.st_size and self._prefix_intact(fi.path, row):
-                mode = "append"
+                # unchanged size but a partial tail last time: just retry the tail
+                mode = "tail_retry" if (st.st_size == row["size"] and row["partial_tail"]) else "append"
                 start = row["parsed_bytes"]
                 line_no = row["line_count"]
                 prev = row
@@ -568,7 +569,9 @@ class Ingester:
         def union(a: str, b: str) -> None:
             ra, rb = find(a), find(b)
             if ra != rb:
-                parent[max(ra, rb)] = min(ra, rb)   # root = lexicographically smallest session id
+                # root = smallest session id, never a subagent when a real session is in the thread
+                key = lambda x: (x.startswith("agent-"), x)  # noqa: E731
+                parent[max(ra, rb, key=key)] = min(ra, rb, key=key)
 
         for row in conn.execute("SELECT session_id, is_subagent, parent_session_id FROM sessions"):
             find(row[0])
@@ -591,7 +594,7 @@ class Ingester:
         conn.execute("""UPDATE sessions SET n_messages = (SELECT COUNT(*) FROM messages WHERE messages.session_id = sessions.session_id)""")
         conn.execute("DELETE FROM threads")
         conn.execute("""INSERT INTO threads(thread_id, n_sessions, n_messages, first_ts, last_ts)
-                        SELECT thread_id, COUNT(*), SUM(n_messages), MIN(first_ts), MAX(last_ts) FROM sessions
+                        SELECT thread_id, SUM(is_subagent = 0), SUM(n_messages), MIN(first_ts), MAX(last_ts) FROM sessions
                         WHERE thread_id IS NOT NULL GROUP BY thread_id""")
         conn.execute("COMMIT")
         stats["threads"] = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]

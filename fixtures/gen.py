@@ -317,6 +317,7 @@ class Conv:
                 rec["message"]["context_management"] = None
             self.push(rec)
             out.append(rec)
+        for _ in blocks:   # after the whole message, so its 1-8 block lines stay consecutive (P0 §c)
             self.noise()
         return out
 
@@ -667,6 +668,10 @@ class Conv:
             self.turn()
         if n_compact and len(self.compactions) < n_compact:
             self.compact()
+        if target_lines < 12:
+            # a tiny (<10 lines) file: a session abandoned mid-turn
+            del self.records[target_lines:]
+            return
         if self.rng.random() < 0.3 or len(self.records) < 60:
             self.meta("cost-state")
 
@@ -693,7 +698,7 @@ def copy_prefix(ctx: Ctx, src: List[Dict[str, Any]], n: int, new_sid: str, varia
     for i, rec in enumerate(src[:n]):
         rec = json.loads(json.dumps(rec))  # deep copy, nothing shared
         if "sessionId" in rec:
-            if variant == "rewrite" or (variant == "mixed" and i % 2 == 0):
+            if variant in ("rewrite", "noncontiguous") or (variant == "mixed" and i % 2 == 0):
                 rec["sessionId"] = new_sid
         out.append(rec)
     return out
@@ -776,9 +781,9 @@ class Planner:
         # subagent parents: the five longest originals, two Agent calls each (~16% of files)
         agent_parents = set(sorted(range(28), key=lambda i: -targets[i])[:5])
         for i in range(28):
-            scheduled = r.random() < 0.35
+            scheduled = r.random() < 0.25   # copies inherit their source's opener, so ~35% of files overall
             n_compact = r.randint(1, 3) if i in (0, 5, 11, 19) else 0
-            plant = plants.pop(0) if plants else None
+            plant = plants.pop(0) if plants and i not in (3, 9, 17) else None   # not the tiny sessions
             agent_budget = 2 if i in agent_parents else 0
             originals.append(self.new_session(targets[i], scheduled, n_compact, plant, agent_budget))
         # resume/fork chain A -> B -> C (C copies B's whole content, which includes A's prefix)
@@ -862,16 +867,21 @@ class Planner:
                 "session_id": s["session_id"], "root": s["root"], "projdir": s["projdir"], "cwd": s["cwd"],
                 "complete_lines": n, "truncated_tail": trunc, "copied_records": s["copied"],
                 "copy_from": s["copy_from"], "scheduled": s["scheduled"], "type_counts": tcounts,
-                "compactions": s["compactions"],
+                # a boundary whose summary line was truncated away is not a complete compaction on disk
+                "compactions": [c for c in s["compactions"]
+                                if any(x.get("uuid") == c["summary"] for x in s["records"][:n])],
                 "is_subagent": "subagent_of" in s,
             }
             if conv is not None:
                 # every human prompt in the file, including ones inside a copied prefix
                 info["human_prompt_uuids"] = [x["uuid"] for x in s["records"][:n]
                                               if x.get("uuid") in self.ctx.human_uuids]
+                disk = s["records"][:n]
+                lp = [x["lastPrompt"] for x in disk if x.get("type") == "last-prompt"]
+                md = [x["mode"] for x in disk if x.get("type") == "mode"]
                 info["final_title"] = conv.final_title
-                info["final_last_prompt"] = conv.final_last_prompt
-                info["final_mode"] = conv.final_mode
+                info["final_last_prompt"] = lp[-1] if lp else None
+                info["final_mode"] = md[-1] if md else None
                 # title as the ingester should resolve it: last custom-title else last ai-title
                 title = None
                 for x in s["records"][:n]:
