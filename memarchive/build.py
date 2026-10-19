@@ -175,7 +175,7 @@ class Builder:
             res = self.summarizer.summarize(p, tier)
             report = evaluate(res.text, level=node["level"], source_bytes=pack.source_bytes,
                               proper_nouns=pack.proper_nouns, sensitivity=pack.sensitivity,
-                              baseline=self.baseline(node["level"]))
+                              baseline=self.baseline(node["level"]), source_text=pack.text)
             history.append({"tier": tier, "model": res.model, "summary_bytes": len(res.text.encode("utf-8")),
                             "failed": report.failed, "detail": res.detail,
                             "evasion_hits": next((c.detail.get("hits") for c in report.checks if c.name == "evasion"), None)})

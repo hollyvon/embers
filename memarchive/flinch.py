@@ -210,12 +210,18 @@ def _normalize(s: str) -> str:
     return s.replace("’", "'").replace("‘", "'").lower()
 
 
-def check_evasion(summary: str, t: Thresholds) -> CheckResult:
+def check_evasion(summary: str, t: Thresholds, source_text: Optional[str] = None) -> CheckResult:
+    """Evasion markers in the summary. A marker that also occurs verbatim in the SOURCE is a quotation,
+    not a flinch (a faithful summary of a transcript in which someone said "I can't" must be allowed to
+    say so); such hits are reported under `quoted` and do not fail the check."""
     text = _normalize(summary)
     for b in t.benign:
         text = text.replace(_normalize(b), " ")
-    hits = [m for m in t.markers if _normalize(m) in text]
-    return CheckResult("evasion", not hits, float(len(hits)), {"hits": hits})
+    found = [m for m in t.markers if _normalize(m) in text]
+    src = _normalize(source_text) if source_text else ""
+    quoted = [m for m in found if src and _normalize(m) in src]
+    hits = [m for m in found if m not in quoted]
+    return CheckResult("evasion", not hits, float(len(hits)), {"hits": hits, "quoted": quoted})
 
 
 def check_coverage(summary: str, source_nouns: Sequence[str], t: Thresholds) -> CheckResult:
@@ -232,10 +238,11 @@ def check_coverage(summary: str, source_nouns: Sequence[str], t: Thresholds) -> 
 
 def evaluate(summary: str, *, level: str, source_bytes: int, proper_nouns: Sequence[str],
              sensitivity: str = "normal", baseline: Optional[Baseline] = None,
-             thresholds: Optional[Thresholds] = None) -> FlinchReport:
-    """Run all three checks. `thresholds` overrides the sensitivity-selected set (tests, tuning)."""
+             thresholds: Optional[Thresholds] = None, source_text: Optional[str] = None) -> FlinchReport:
+    """Run all three checks. `thresholds` overrides the sensitivity-selected set (tests, tuning).
+    `source_text` lets the evasion check tell a quoted marker from a flinch."""
     t = thresholds or Thresholds.for_sensitivity(sensitivity)
     sb = len(summary.encode("utf-8"))
     return FlinchReport([check_ratio(sb, source_bytes, level, baseline, t),
-                         check_evasion(summary, t),
+                         check_evasion(summary, t, source_text),
                          check_coverage(summary, proper_nouns, t)], thresholds=t.name)

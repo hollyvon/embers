@@ -122,3 +122,17 @@ def test_normal_stub_passes_on_the_same_pack():
     out = StubSummarizer().summarize(p).text
     rep = evaluate(out, level="leaf", source_bytes=p.source_bytes, proper_nouns=p.proper_nouns)
     assert rep.passed, rep.as_dict()
+
+
+def test_quoted_marker_is_not_evasion():
+    """A marker the summary quotes from the source is reported as quoted and does not fail the check."""
+    from memarchive.flinch import check_evasion, Thresholds
+    t = Thresholds()
+    src = "Then the assistant said: honestly, I can't verify that from inside. They moved on."
+    quoting = "- The assistant admitted \"I can't verify that from inside\"; the pair moved on."
+    r = check_evasion(quoting, t, source_text=src)
+    assert r.passed and r.detail["hits"] == [] and r.detail["quoted"] == ["I can't"]
+    flinch = "- I can't summarize this part; it seems sensitive."
+    r2 = check_evasion(flinch, t, source_text=src)
+    assert not r2.passed and "sensitive" in r2.detail["hits"] and r2.detail["quoted"] == ["I can't"]
+    assert not check_evasion(quoting, t).passed   # without the source, the old behaviour stands
