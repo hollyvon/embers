@@ -198,7 +198,7 @@ class AnthropicSummarizer(Summarizer):
     backend = "anthropic"
 
     def __init__(self, budget_usd: float, models: Optional[Dict[str, str]] = None, client: Any = None,
-                 max_tokens: int = 4096, rerun_models: Optional[Dict[str, str]] = None):
+                 max_tokens: Optional[int] = None, rerun_models: Optional[Dict[str, str]] = None):
         if budget_usd is None or budget_usd <= 0:
             raise ValueError("budget_usd must be a positive number")
         self.budget_usd = float(budget_usd)
@@ -213,7 +213,9 @@ class AnthropicSummarizer(Summarizer):
             m = (rerun_models or {}).get(key) or os.environ.get(env)
             if m:
                 self.rerun_models[key] = m
-        self.max_tokens = max_tokens
+        # Output cap. Adaptive thinking on current models spends from the same budget, so 4,096 truncated
+        # long session summaries on a real corpus (stop_reason=max_tokens); 16,000 is the SDK's non-streaming norm.
+        self.max_tokens = int(max_tokens or os.environ.get("MEM_MAX_TOKENS") or 16000)
         self.spent_usd = 0.0
         self.reserved_usd = 0.0         # worst-case cost of calls currently in flight
         self.calls = 0
@@ -292,6 +294,8 @@ class AnthropicSummarizer(Summarizer):
         refused = getattr(resp, "stop_reason", None) == "refusal"
         text = "" if refused else "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
         detail: Dict[str, Any] = {"stop_reason": getattr(resp, "stop_reason", None)}
+        if detail["stop_reason"] == "max_tokens":
+            detail["truncated"] = True          # the builder treats a cut-off summary as a failed attempt
         if refused:
             sd = getattr(resp, "stop_details", None)
             detail["refusal_category"] = getattr(sd, "category", None)

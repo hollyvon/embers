@@ -238,8 +238,11 @@ class Builder:
             entry.update(effort="medium", reason="rerun refused; one more try on the small tier at effort medium")
         if res.refused:
             entry["refused"] = True
+        truncated = bool(res.detail.get("truncated")) if isinstance(res.detail, dict) else False
+        if truncated:
+            entry["failed"] = list(report.failed) + ["truncated"]   # a cut-off summary never passes, whatever the checks say
         job.history.append(entry)
-        if report.passed:
+        if report.passed and not truncated:
             _store(conn, node, job.pack, res, "ok", job.failures, report, job.history, job.kids)
             self._since[node["level"]] = self._since.get(node["level"], 0) + 1
             conn.commit()
@@ -256,7 +259,7 @@ class Builder:
         conn.commit()
         self.log("%s %s %s: failed %s" % (node["level"], node["id"],
                  "-> manual" if status == "manual" else "-> rerun on " + self._tier(node["level"], job.failures),
-                 ",".join(report.failed)))
+                 ",".join(entry["failed"])))
         return status
 
     # ---- one level
