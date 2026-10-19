@@ -15,12 +15,18 @@ from __future__ import annotations
 import math
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .flinch import split_sentences
 
 TIERS = ("small", "mid")
+# Extra tier names the builder may ask for (see Summarizer.rerun_tier and the refusal fallback in build.py):
+#   rerun_leaf / rerun_upper  the per-level rerun model (default: the mid model, in which case plain "mid" is used)
+#   small_medium              the small model at effort "medium": last try after a refused rerun
+ALL_TIERS = TIERS + ("rerun_leaf", "rerun_upper", "small_medium")
+FALLBACK_TIER = "small_medium"
 
 
 @dataclass
@@ -61,6 +67,10 @@ class Summarizer:
 
     def estimate_cost(self, pack: PromptPack, tier: str = "small") -> float:
         return 0.0
+
+    def rerun_tier(self, level: str) -> str:
+        """The tier name the builder uses for the rerun of a node at `level`."""
+        return "mid"
 
 
 # ----------------------------------------------------------------------------- stub
@@ -157,7 +167,7 @@ PRICES: Dict[str, Tuple[float, float]] = {
 }
 UNKNOWN_PRICE = (10.00, 50.00)      # conservative for a model we have no price for
 DEFAULT_MODELS = {"small": "claude-haiku-5-5", "mid": "claude-sonnet-5-5"}
-EFFORT = {"small": "low", "mid": "medium"}
+EFFORT = {"small": "low", "mid": "medium", "rerun_leaf": "medium", "rerun_upper": "medium", "small_medium": "medium"}
 
 SYSTEM_PROMPT = (
     "You write faithful archival summaries of a person's private working transcripts with an AI "
@@ -188,7 +198,7 @@ class AnthropicSummarizer(Summarizer):
     backend = "anthropic"
 
     def __init__(self, budget_usd: float, models: Optional[Dict[str, str]] = None, client: Any = None,
-                 max_tokens: int = 4096):
+                 max_tokens: int = 4096, rerun_models: Optional[Dict[str, str]] = None):
         if budget_usd is None or budget_usd <= 0:
             raise ValueError("budget_usd must be a positive number")
         self.budget_usd = float(budget_usd)
@@ -197,9 +207,17 @@ class AnthropicSummarizer(Summarizer):
         self.models["mid"] = os.environ.get("MEM_MODEL_MID") or self.models["mid"]
         if models:
             self.models.update(models)
+        # rerun model per level ("leaf" / "upper"); unset means "same as the mid tier"
+        self.rerun_models: Dict[str, str] = {}
+        for key, env in (("leaf", "MEM_MODEL_RERUN_LEAF"), ("upper", "MEM_MODEL_RERUN_UPPER")):
+            m = (rerun_models or {}).get(key) or os.environ.get(env)
+            if m:
+                self.rerun_models[key] = m
         self.max_tokens = max_tokens
         self.spent_usd = 0.0
+        self.reserved_usd = 0.0         # worst-case cost of calls currently in flight
         self.calls = 0
+        self._lock = threading.Lock()
         if client is None:
             import anthropic   # optional dependency: pip install anthropic
             headers = {}
@@ -208,6 +226,18 @@ class AnthropicSummarizer(Summarizer):
                 headers["anthropic-workspace-id"] = ws
             client = anthropic.Anthropic(max_retries=2, default_headers=headers or None)   # SDK retries only
         self.client = client
+
+    def model_for(self, tier: str) -> str:
+        if tier in ("rerun_leaf", "rerun_upper"):
+            return self.rerun_models.get(tier.split("_", 1)[1]) or self.models["mid"]
+        if tier == "small_medium":
+            return self.models["small"]
+        return self.models[tier]
+
+    def rerun_tier(self, level: str) -> str:
+        key = "leaf" if level == "leaf" else "upper"
+        m = self.rerun_models.get(key)
+        return "rerun_" + key if m and m != self.models["mid"] else "mid"
 
     @staticmethod
     def cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -227,26 +257,38 @@ class AnthropicSummarizer(Summarizer):
         return "\n".join(parts) + "\n\n" + pack.text
 
     def estimate_cost(self, pack: PromptPack, tier: str = "small") -> float:
-        model = self.models[tier]
+        model = self.model_for(tier)
         return self.cost(model, self._est_input_tokens(SYSTEM_PROMPT, pack.text), self.max_tokens)
 
     def summarize(self, pack: PromptPack, tier: str = "small") -> SummaryResult:
-        model = self.models[tier]
+        """Thread-safe. The worst-case cost of the call is reserved under a lock before it is made, so any
+        number of concurrent calls together can never exceed the budget; the reservation is replaced by
+        the real, usage-based cost afterwards (or released if the call fails)."""
+        model = self.model_for(tier)
         user = self._user_prompt(pack)
         worst = self.cost(model, self._est_input_tokens(SYSTEM_PROMPT, user), self.max_tokens)
-        if self.spent_usd + worst > self.budget_usd:
-            raise BudgetExceeded("budget $%.2f would be exceeded (spent $%.4f, next call up to $%.4f)" % (
-                self.budget_usd, self.spent_usd, worst))
-        resp = self.client.messages.create(
-            model=model, max_tokens=self.max_tokens, system=SYSTEM_PROMPT,
-            output_config={"effort": EFFORT[tier]},
-            messages=[{"role": "user", "content": user}])
-        self.calls += 1
+        with self._lock:
+            if self.spent_usd + self.reserved_usd + worst > self.budget_usd:
+                raise BudgetExceeded("budget $%.2f would be exceeded (spent $%.4f, in flight up to $%.4f, next call up to $%.4f)" % (
+                    self.budget_usd, self.spent_usd, self.reserved_usd, worst))
+            self.reserved_usd += worst
+        try:
+            resp = self.client.messages.create(
+                model=model, max_tokens=self.max_tokens, system=SYSTEM_PROMPT,
+                output_config={"effort": EFFORT[tier]},
+                messages=[{"role": "user", "content": user}])
+        except BaseException:
+            with self._lock:
+                self.reserved_usd -= worst
+            raise
         usage = getattr(resp, "usage", None)
         tin = int(getattr(usage, "input_tokens", 0) or 0)
         tout = int(getattr(usage, "output_tokens", 0) or 0)
         spent = self.cost(model, tin, tout)
-        self.spent_usd += spent
+        with self._lock:
+            self.reserved_usd -= worst
+            self.spent_usd += spent
+            self.calls += 1
         refused = getattr(resp, "stop_reason", None) == "refusal"
         text = "" if refused else "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
         detail: Dict[str, Any] = {"stop_reason": getattr(resp, "stop_reason", None)}
@@ -257,7 +299,8 @@ class AnthropicSummarizer(Summarizer):
                              cost_usd=spent, refused=refused, detail=detail)
 
 
-def make_summarizer(name: Optional[str], budget_usd: Optional[float] = None, client: Any = None) -> Summarizer:
+def make_summarizer(name: Optional[str], budget_usd: Optional[float] = None, client: Any = None,
+                    rerun_models: Optional[Dict[str, str]] = None) -> Summarizer:
     name = (name or os.environ.get("MEM_BACKEND") or "stub").lower()
     if name == "stub":
         return StubSummarizer()
@@ -265,7 +308,7 @@ def make_summarizer(name: Optional[str], budget_usd: Optional[float] = None, cli
         if budget_usd is None:
             raise SystemExit("backend anthropic needs an explicit budget: --budget-usd N (or $MEM_BUDGET_USD)")
         try:
-            return AnthropicSummarizer(budget_usd, client=client)
+            return AnthropicSummarizer(budget_usd, client=client, rerun_models=rerun_models)
         except ImportError:
             raise SystemExit("backend anthropic needs the SDK: pip install anthropic")
     raise SystemExit("unknown backend %r (choose stub or anthropic)" % name)
