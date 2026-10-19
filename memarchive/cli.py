@@ -6,6 +6,12 @@
     mem sessions [--since DATE] [--limit N]
     mem windows [--index DIR]
     mem stats
+    mem build [--level leaf|session|thread|month|all] [--thread ID] [--backend stub|anthropic] [--budget-usd N]
+              [--dry-run] [--limit N] [--chunk-bytes N]
+    mem describe <session-id | window N | thread ID | node ID>
+    mem expand <node ID> [--full]
+    mem grep "query" [--level ...] [--limit N]
+    mem flags [--status flagged|manual]
 
 Global: --db PATH (or $MEM_DB; default ~/.memory-archive/mem.db), --json (machine output, one JSON per line).
 """
@@ -20,7 +26,10 @@ import sys
 from typing import Any, Dict, List, Optional, Sequence
 
 from . import __version__
+from . import dag
+from .build import BuildOptions, children_of, run_build
 from .ingest import Ingester, default_db_path, open_db
+from .summarize import make_summarizer
 
 CLASSES = ("human", "assistant", "thinking", "tool_use", "tool_result", "attachment", "system", "summary")
 
@@ -158,6 +167,12 @@ def _fmt_block(b: sqlite3.Row, marker: str = " ", width: int = 110, full: bool =
     if full and "\n" in body:
         body = ("\n" + " " * 4).join(body.split("\n"))
     return "%s %-12s %s" % (marker, tag, body)
+
+
+def _block_line(b: sqlite3.Row, marker: str = " ", full: bool = False) -> str:
+    """One rendered block line, as `mem session` prints it (also used by `mem expand` on a leaf)."""
+    stamp = _date(b["ts"], True)[11:] if b["ts"] else "        "
+    return "%s #%-7d %s L%-5d %s" % (marker, b["id"], stamp, b["line_no"], _fmt_block(b, marker="", full=full).lstrip())
 
 
 # ----------------------------------------------------------------------------- commands
@@ -303,9 +318,7 @@ def cmd_session(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
         print("  subagents: %s" % ", ".join(subagents))
     print()
     for b in rows:
-        marker = ">" if a.around is not None and b["id"] == a.around else " "
-        stamp = _date(b["ts"], True)[11:] if b["ts"] else "        "
-        print("%s #%-7d %s L%-5d %s" % (marker, b["id"], stamp, b["line_no"], _fmt_block(b, marker="", full=a.full).lstrip()))
+        print(_block_line(b, marker=">" if a.around is not None and b["id"] == a.around else " ", full=a.full))
     return 0
 
 
@@ -421,6 +434,265 @@ def cmd_stats(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------------- Layer D commands
+
+def _need_nodes(conn: sqlite3.Connection) -> bool:
+    ok = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'nodes'").fetchone() is not None
+    if ok:
+        ok = conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone() is not None
+    if not ok:
+        sys.stderr.write("no summaries yet: run `mem build` first\n")
+    return ok
+
+
+def _node_dict(n: sqlite3.Row, summary: bool = True) -> Dict[str, Any]:
+    d = {k: n[k] for k in n.keys() if k != "metrics_json"}
+    if not summary:
+        d.pop("summary", None)
+    try:
+        d["metrics"] = json.loads(n["metrics_json"]) if n["metrics_json"] else {}
+    except ValueError:
+        d["metrics"] = {}
+    return d
+
+
+def _span(n: sqlite3.Row) -> str:
+    a, b = _date(n["first_ts"]), _date(n["last_ts"])
+    return a if a == b else "%s..%s" % (a, b)
+
+
+def _node_line(n: sqlite3.Row, width: int = 90) -> str:
+    return "%-14s %-8s %-23s %-8s %4d src  %s" % (n["id"], n["level"], _span(n), n["status"], n["n_sources"],
+                                                _one_line(n["summary"], width))
+
+
+def _resolve_node(conn: sqlite3.Connection, words: List[str]) -> sqlite3.Row:
+    kind, val = (None, words[0]) if len(words) == 1 else (words[0], words[1])
+    if len(words) > 2 or (kind is not None and kind not in ("window", "session", "thread", "node")):
+        raise SystemExit("usage: mem describe <session-id | window N | thread ID | node ID>")
+
+    def by_node() -> Optional[sqlite3.Row]:
+        rows = conn.execute("SELECT * FROM nodes WHERE id = ? OR id LIKE ? ORDER BY id", (val, val + "%")).fetchall()
+        exact = [r for r in rows if r["id"] == val]
+        if exact or len(rows) == 1:
+            return (exact or rows)[0]
+        if rows:
+            raise SystemExit("ambiguous node id %r: %s" % (val, ", ".join(r["id"] for r in rows[:8])))
+        return None
+
+    def by_session() -> Optional[sqlite3.Row]:
+        s = _resolve_session(conn, val)
+        return conn.execute("SELECT * FROM nodes WHERE id = ?", (dag.node_id("S", s["session_id"]),)).fetchone() if s else None
+
+    def by_thread() -> Optional[sqlite3.Row]:
+        rows = conn.execute("SELECT thread_id FROM threads WHERE thread_id = ? OR thread_id LIKE ?", (val, val + "%")).fetchall()
+        if len(rows) > 1 and not any(r[0] == val for r in rows):
+            raise SystemExit("ambiguous thread id %r" % val)
+        return dag.thread_level_node(conn, val if any(r[0] == val for r in rows) else rows[0][0]) if rows else None
+
+    if kind == "node":
+        order = [by_node]
+    elif kind in ("window", "session"):
+        order = [by_session]
+    elif kind == "thread":
+        order = [by_thread]
+    else:
+        order = [by_node, by_session, by_thread] if not val.isdigit() else [by_session, by_node]
+    for fn in order:
+        n = fn()
+        if n is not None:
+            return n
+    raise SystemExit("no summary node for %s (run `mem build`?)" % " ".join(words))
+
+
+def cmd_describe(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
+    if not _need_nodes(conn):
+        return 1
+    n = _resolve_node(conn, a.target)
+    kids = children_of(conn, n["id"])
+    meta = json.loads(n["metrics_json"] or "{}")
+    session = n["session_id"]
+    win = _window_of(conn, session) if session else None
+    leaf_msgs: List[sqlite3.Row] = []
+    if n["level"] == "leaf":
+        leaf_msgs = conn.execute(
+            """SELECT m.uuid, m.ts, b.text FROM node_sources ns JOIN messages m ON m.uuid = ns.uuid
+               JOIN blocks b ON b.uuid = m.uuid AND b.class = 'human' AND m.is_human_prompt = 1
+               WHERE ns.node_id = ? ORDER BY COALESCE(m.ts, ''), m.line_no, b.block_index LIMIT 10""", (n["id"],)).fetchall()
+    if a.json:
+        _emit({"node": _node_dict(n), "window": win})
+        for k in kids:
+            _emit({"child": _node_dict(k, summary=True)})
+        for m in leaf_msgs:
+            _emit({"prompt": {"uuid": m["uuid"], "ts": m["ts"], "text": _one_line(m["text"], 200)}})
+        return 0
+    print("%s  %s  %s  %s  %d source%s (%d bytes)  model=%s backend=%s%s" % (
+        n["id"], n["level"], _date(n["first_ts"], True) + " -> " + _date(n["last_ts"], True), n["status"],
+        n["n_sources"], "" if n["n_sources"] == 1 else "s", n["source_bytes"], n["model"] or "-", n["backend"] or "-",
+        "  [thread: this session is the whole thread]" if meta.get("thread_double") else ""))
+    print("  thread %s%s%s" % ((n["thread_id"] or "-")[:8], "  session %s" % session[:8] if session else "",
+                              "  window w%s" % win if win is not None else ""))
+    print()
+    print(n["summary"] if n["summary"] else "(no summary yet: status %s)" % n["status"])
+    print()
+    if kids:
+        print("children:")
+        for k in kids:
+            print("  " + _node_line(k))
+    elif leaf_msgs:
+        print("prompts in this leaf (mem expand %s for the raw messages):" % n["id"])
+        for m in leaf_msgs:
+            print("  %s  %s" % (_date(m["ts"], True)[11:], _one_line(m["text"], 100)))
+    return 0
+
+
+def cmd_expand(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
+    if not _need_nodes(conn):
+        return 1
+    n = _resolve_node(conn, ["node", a.node])
+    if n["level"] != "leaf":
+        kids = children_of(conn, n["id"])
+        if a.json:
+            for k in kids:
+                _emit(_node_dict(k))
+            return 0
+        print("%s (%s) -> %d child%s" % (n["id"], n["level"], len(kids), "" if len(kids) == 1 else "ren"))
+        for k in kids:
+            print()
+            print(_node_line(k, width=60))
+            body = k["summary"] if k["summary"] else "(no summary yet)"
+            print("\n".join("    " + ln for ln in body.splitlines()) if a.full else "    " + _one_line(body, 300))
+        return 0
+    rows = conn.execute(
+        """SELECT b.* FROM node_sources ns JOIN blocks b ON b.uuid = ns.uuid WHERE ns.node_id = ?
+           ORDER BY COALESCE(b.ts, ''), b.line_no, b.block_index""", (n["id"],)).fetchall()
+    if a.json:
+        _emit({"node": _node_dict(n, summary=False)})
+        for b in rows:
+            _emit(_block_dict(b, full=True))
+        return 0
+    print("leaf %s  %s -> %s  %d messages, %d blocks" % (n["id"], _date(n["first_ts"], True), _date(n["last_ts"], True),
+                                                         n["n_sources"], len(rows)))
+    print()
+    for b in rows:
+        print(_block_line(b, full=a.full))
+    return 0
+
+
+def cmd_grep(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
+    if not _need_nodes(conn):
+        return 1
+    where = ""
+    params: List[Any] = []
+    if a.level:
+        levels = [x.strip() for x in a.level.split(",") if x.strip()]
+        for lv in levels:
+            if lv not in dag.LEVELS:
+                raise SystemExit("unknown level %r (choose from %s)" % (lv, ", ".join(dag.LEVELS)))
+        where = " AND n.level IN (%s)" % ",".join("?" * len(levels))
+        params += levels
+    sql = """SELECT n.*, snippet(nodes_fts, 1, '[', ']', '…', 16) AS snippet, bm25(nodes_fts) AS score
+             FROM nodes_fts JOIN nodes n ON n.id = nodes_fts.node_id
+             WHERE nodes_fts MATCH ? AND n.status = 'ok'%s ORDER BY score LIMIT ?""" % where
+    rows = _fts_query(conn, sql, a.query, params + [a.limit])
+    for i, h in enumerate(rows, start=1):
+        if a.json:
+            d = _node_dict(h, summary=False)
+            d.update(rank=i, score=h["score"], snippet=h["snippet"], span=_span(h))
+            _emit(d)
+        else:
+            print("%-14s %-8s %-23s %s" % (h["id"], h["level"], _span(h), _one_line(h["snippet"], 150)))
+    if not rows and not a.json:
+        print("no hits")
+    return 0 if rows else 1
+
+
+def _explain(report: Dict[str, Any]) -> List[str]:
+    out = []
+    for name, c in (report.get("checks") or {}).items():
+        d = c.get("detail", {})
+        if c.get("passed"):
+            continue
+        if name == "ratio":
+            out.append("ratio %.3f outside [%s, %s] (%s, %s)" % (
+                c["score"], "%.3f" % d["low"] if "low" in d else "-", "%.3f" % d["high"] if "high" in d else "-",
+                d.get("reason", "?"), d.get("source", "")))
+        elif name == "evasion":
+            out.append("evasion markers: " + ", ".join(repr(h) for h in d.get("hits", [])))
+        elif name == "coverage":
+            out.append("coverage %.2f < %.2f of %d nouns, missing: %s" % (
+                c["score"], d.get("threshold", 0), d.get("probed", 0), ", ".join(d.get("missing", [])[:8])))
+    return out
+
+
+def cmd_flags(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'nodes'").fetchone() is None:
+        sys.stderr.write("no summaries yet: run `mem build` first\n")
+        return 1
+    statuses = [a.status] if a.status else ["flagged", "manual"]
+    rows = conn.execute("SELECT * FROM nodes WHERE status IN (%s) ORDER BY status, level, COALESCE(first_ts, ''), id" %
+                        ",".join("?" * len(statuses)), statuses).fetchall()
+    for n in rows:
+        meta = json.loads(n["metrics_json"] or "{}")
+        report = meta.get("report") or {}
+        if a.json:
+            d = _node_dict(n, summary=False)
+            d["failed"] = report.get("failed", [])
+            _emit(d)
+            continue
+        print("%-14s %-8s %-8s attempts=%d  %s  sensitivity=%s  thresholds=%s" % (
+            n["id"], n["level"], n["status"], n["attempts"], _span(n), meta.get("sensitivity", "normal"),
+            report.get("thresholds", "-")))
+        for line in _explain(report) or ["(no metrics recorded)"]:
+            print("    " + line)
+        if n["summary"]:
+            print("    last output: " + _one_line(n["summary"], 120))
+    if not rows and not a.json:
+        print("no flagged or manual nodes")
+    return 0
+
+
+def cmd_build(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
+    levels = list(dag.LEVELS) if a.all or a.level == "all" else [a.level]
+    budget = a.budget_usd if a.budget_usd is not None else (float(os.environ["MEM_BUDGET_USD"]) if os.environ.get("MEM_BUDGET_USD") else None)
+    backend = a.backend or os.environ.get("MEM_BACKEND") or "stub"
+    summarizer = make_summarizer(backend, budget_usd=budget)
+    scope = None
+    if a.thread:
+        rows = conn.execute("SELECT thread_id FROM threads WHERE thread_id = ? OR thread_id LIKE ?", (a.thread, a.thread + "%")).fetchall()
+        if not rows:
+            raise SystemExit("no such thread: %s" % a.thread)
+        scope = [r[0] for r in rows]
+    chunk = a.chunk_bytes or int(os.environ.get("MEM_CHUNK_BYTES", dag.DEFAULT_CHUNK_BYTES))
+    log = (lambda m: sys.stderr.write(m + "\n")) if a.verbose else (lambda m: None)
+    res = run_build(conn, summarizer, BuildOptions(levels=levels, thread_ids=scope, chunk_bytes=chunk, limit=a.limit,
+                                                   dry_run=a.dry_run), log=log)
+    if a.json:
+        _emit(res)
+    elif a.dry_run:
+        print("dry run (backend %s): nothing written" % backend)
+        if scope is not None and "month" in levels:
+            print("  (month level skipped when --thread is given)")
+        print("%-8s %6s %8s %12s %12s %10s" % ("level", "nodes", "pending", "source bytes", "est. tokens", "est. $"))
+        for lv, p in res["plan"].items():
+            print("%-8s %6d %8d %12d %12d %10s" % (lv, p["nodes"], p["pending"], p["source_bytes"], p["est_input_tokens"],
+                                                  ("%.4f" % p["est_cost_usd"]) if backend == "anthropic" else "-"))
+    else:
+        print("build (backend %s): %d accepted, %d manual%s" % (backend, res["built"], res["manual"],
+                                                              ", %d accepted after a rerun" % res["flagged_then_ok"] if res["flagged_then_ok"] else ""))
+        for lv, c in res["levels"].items():
+            print("  %-8s ok %d  manual %d  not ready %d" % (lv, c["ok"], c["manual"], c["not_ready"]))
+        if res["manual"]:
+            print("%d node(s) need manual attention: see `mem flags`" % res["manual"])
+        if res["stopped"] == "budget":
+            print("STOPPED: %s" % res.get("stop_reason"))
+        elif res["stopped"] == "limit":
+            print("stopped at --limit; run again to continue")
+        if backend == "anthropic":
+            print("spent $%.4f" % res["spent_usd"])
+    return 3 if res["stopped"] == "budget" else 0
+
+
 # ----------------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -471,6 +743,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("stats", help="archive statistics")
     p.set_defaults(fn=cmd_stats)
+
+    p = sub.add_parser("build", help="build the summary DAG (Layer D); idempotent")
+    p.add_argument("--level", choices=list(dag.LEVELS) + ["all"], default="all")
+    p.add_argument("--all", action="store_true", help="same as --level all")
+    p.add_argument("--thread", help="only this thread id (or prefix); skips the month level")
+    p.add_argument("--backend", choices=["stub", "anthropic"], help="default $MEM_BACKEND or stub")
+    p.add_argument("--budget-usd", type=float, help="hard spend cap for the anthropic backend (or $MEM_BUDGET_USD)")
+    p.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
+    p.add_argument("--limit", type=int, default=0, help="build at most N nodes this run")
+    p.add_argument("--chunk-bytes", type=int, help="leaf prose budget in bytes (default 24576 or $MEM_CHUNK_BYTES)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(fn=cmd_build)
+
+    p = sub.add_parser("describe", help="show a node's summary and its children (session id, window N, thread ID, node ID)")
+    p.add_argument("target", nargs="+", metavar="target")
+    p.set_defaults(fn=cmd_describe)
+
+    p = sub.add_parser("expand", help="descend one level from a node (raw messages at a leaf)")
+    p.add_argument("node")
+    p.add_argument("--full", action="store_true")
+    p.set_defaults(fn=cmd_expand)
+
+    p = sub.add_parser("grep", help="full-text search over accepted summaries")
+    p.add_argument("query")
+    p.add_argument("--level", help="comma-separated: %s" % ",".join(dag.LEVELS))
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(fn=cmd_grep)
+
+    p = sub.add_parser("flags", help="list flagged / manual nodes with their detector metrics")
+    p.add_argument("--status", choices=["flagged", "manual"])
+    p.set_defaults(fn=cmd_flags)
     return ap
 
 

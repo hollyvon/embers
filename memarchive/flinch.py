@@ -46,10 +46,10 @@ class Thresholds:
     # ratio check
     min_baseline: int = 20                 # status=ok nodes needed before the DB baseline replaces the defaults
     iqr_k: float = 1.5
-    median_low_frac: float = 0.5           # the low fence is never tighter than median * this
-    median_high_mult: float = 2.0          # the high fence is never tighter than median * this
+    median_low_frac: float = 0.4           # the low fence is never tighter than median * this
+    median_high_mult: float = 3.0          # the high fence is never tighter than median * this
     default_fences: Dict[str, Tuple[float, float]] = field(default_factory=lambda: dict(DEFAULT_FENCES))
-    min_source_bytes: int = 600            # below this the ratio is not meaningful and the check passes
+    min_source_bytes: int = 1500           # below this the ratio is not meaningful and the check passes
     # evasion check
     markers: Tuple[str, ...] = EVASION_MARKERS
     benign: Tuple[str, ...] = EVASION_BENIGN
@@ -61,7 +61,7 @@ class Thresholds:
     @classmethod
     def high_sensitivity(cls) -> "Thresholds":
         t = cls()
-        return replace(t, iqr_k=1.0, median_low_frac=0.7, median_high_mult=1.6, coverage_min=0.75,
+        return replace(t, iqr_k=1.0, median_low_frac=0.6, median_high_mult=2.5, coverage_min=0.75,
                        default_fences={k: (lo * 2, hi) for k, (lo, hi) in DEFAULT_FENCES.items()}, name="high")
 
     @classmethod
@@ -72,6 +72,7 @@ class Thresholds:
 # ----------------------------------------------------------------------------- text helpers
 
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+CLAUSE_STARTERS = ":-*\u2022>#"   # a capital after one of these is a clause start, not a name
 SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 STOPLIST = frozenset("""
 The This That These Those There Then Than They Them Their It Its We Our You Your He She His Her
@@ -100,8 +101,11 @@ def extract_proper_nouns(text: str) -> List[str]:
     first: Dict[str, int] = {}
     pos = 0
     for sent in split_sentences(text):
-        toks = TOKEN_RE.findall(sent)
-        for i, tok in enumerate(toks):
+        toks = []   # (token, starts_a_clause)
+        for m in TOKEN_RE.finditer(sent):
+            before = sent[:m.start()].rstrip()
+            toks.append((m.group(), not before or before[-1] in CLAUSE_STARTERS))
+        for tok, clause_start in toks:
             if tok in STOPLIST or len(tok) < 2:
                 continue
             ok = False
@@ -109,7 +113,7 @@ def extract_proper_nouns(text: str) -> List[str]:
                 ok = True
             elif _is_internal_capital(tok):
                 ok = True
-            elif i > 0 and tok[0].isupper() and tok[1:].islower():
+            elif not clause_start and tok[0].isupper() and tok[1:].islower():
                 ok = True
             if ok:
                 key = tok

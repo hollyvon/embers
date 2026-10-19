@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -88,13 +89,13 @@ class StubSummarizer(Summarizer):
 
     def _extract(self, pack: PromptPack) -> str:
         target = max(self.min_bytes, int((self.ratio_leaf if pack.level == "leaf" else self.ratio_upper) * pack.source_bytes))
-        sents: List[Tuple[int, int, str]] = []          # (block index, sentence index, text)
+        sents: List[Tuple[int, int, str, str]] = []     # (block index, sentence index, text, kind)
         for bi, (kind, text) in enumerate(pack.segments):
-            if kind == "thinking":
-                continue                                # thinking informs coverage only if it is also in prose
             for si, s in enumerate(split_sentences(text)):
-                sents.append((bi, si, s))
-        words = [set(w.lower() for w in _words(s)) for _, _, s in sents]
+                s = re.sub(r"^[-*\u2022]\s+", "", s)       # bullets from a child summary
+                if s:
+                    sents.append((bi, si, s, kind))
+        words = [set(w.lower() for w in _words(s)) for _, _, s, _k in sents]
         chosen: List[int] = []
         used = 0
 
@@ -115,17 +116,23 @@ class StubSummarizer(Summarizer):
                 if n in w:
                     take(i)
                     break
-        # 2. first sentence of every block
-        for i, (bi, si, _) in enumerate(sents):
-            if si == 0 and used < target:
+        # 2. first sentence of every human/assistant block (thinking is used for coverage only)
+        for i, (bi, si, _, kind) in enumerate(sents):
+            if si == 0 and kind != "thinking" and used < target:
                 take(i)
-        # 3. evenly spaced filler until the target is reached
-        if used < target and sents:
-            step = max(1, len(sents) // 12)
-            for i in range(0, len(sents), step):
-                if used >= target:
-                    break
-                take(i)
+        # 3. evenly spread filler (stride passes, halving) until the target is reached
+        if used < target:
+            rest = [i for i, x in enumerate(sents) if x[3] != "thinking" and i not in chosen]
+            stride = 1
+            while stride * 2 <= len(rest):
+                stride *= 2
+            while used < target and rest:
+                for i in rest[::stride]:
+                    if used >= target:
+                        break
+                    take(i)
+                rest = [i for i in rest if i not in chosen]
+                stride = max(1, stride // 2)
         chosen.sort()
         lines = ["- " + sents[i][2] for i in chosen]
         if not lines:
