@@ -144,6 +144,24 @@ def _store(conn: sqlite3.Connection, node: sqlite3.Row, pack: PromptPack, res: S
         conn.execute("INSERT INTO nodes_fts(node_id, summary) VALUES (?, ?)", (node["id"], res.text))
 
 
+def set_manual_summary(conn: sqlite3.Connection, node: sqlite3.Row, text: str) -> None:
+    """Store an operator-written summary: backend `manual`, model `human`, status `ok`, indexed in nodes_fts.
+    The metrics (report, earlier history) are kept and a {"tier": "manual"} entry is appended. Ancestors built
+    over this node's placeholder are rebuilt by the next `mem build` (their child signature changes)."""
+    text = text.strip()
+    if not text:
+        raise ValueError("empty summary")
+    meta = json.loads(node["metrics_json"] or "{}")
+    nbytes = len(text.encode("utf-8"))
+    meta["history"] = (meta.get("history") or []) + [{"tier": "manual", "model": "human", "summary_bytes": nbytes,
+                                                      "failed": [], "detail": {}, "evasion_hits": None}]
+    meta["manual"] = True
+    conn.execute("""UPDATE nodes SET summary=?, summary_bytes=?, model='human', backend='manual', status='ok',
+                    metrics_json=?, created_at=? WHERE id=?""", (text, nbytes, json.dumps(meta), now_iso(), node["id"]))
+    conn.execute("DELETE FROM nodes_fts WHERE node_id = ?", (node["id"],))
+    conn.execute("INSERT INTO nodes_fts(node_id, summary) VALUES (?, ?)", (node["id"], text))
+
+
 @dataclasses.dataclass
 class _Job:
     """One node moving through its attempts. Owned by the main thread; workers only see snapshots."""

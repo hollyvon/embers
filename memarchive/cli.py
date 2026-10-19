@@ -7,17 +7,20 @@
     mem windows [--index DIR]
     mem stats
     mem build [--level leaf|session|thread|month|all] [--thread ID] [--backend stub|anthropic] [--budget-usd N]
-              [--dry-run] [--limit N] [--chunk-bytes N]
-    mem describe <session-id | window N | thread ID | node ID>
+              [--dry-run] [--limit N] [--chunk-bytes N] [--workers N]
+              [--rerun-model-leaf M] [--rerun-model-upper M]
+    mem describe <session-id | window N | wN | N | thread ID | node ID>
     mem expand <node ID> [--full]
     mem grep "query" [--level ...] [--limit N]
-    mem flags [--status flagged|manual]
+    mem flags [--status flagged|manual] [--export DIR]
+    mem manual <node ID> (--text "..." | --file PATH | --stdin)      |   mem manual --import DIR
 
 Global: --db PATH (or $MEM_DB; default ~/.memory-archive/mem.db), --json (machine output, one JSON per line).
 """
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import os
 import re
@@ -27,7 +30,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from . import __version__
 from . import dag
-from .build import BuildOptions, children_of, run_build
+from .build import BuildOptions, children_of, make_pack, run_build, set_manual_summary
 from .ingest import Ingester, default_db_path, open_db
 from .summarize import make_summarizer
 
@@ -93,8 +96,14 @@ def _fts_query(conn: sqlite3.Connection, sql: str, query: str, params: Sequence[
         return conn.execute(sql, (phrase,) + tuple(params)).fetchall()
 
 
+WINDOW_REF_RE = re.compile(r"\s*(?:window\s*#?\s*|w\s*)(\d+)\s*", re.I)
+
+
 def _resolve_session(conn: sqlite3.Connection, ident: str) -> Optional[sqlite3.Row]:
-    """Accept a full/prefix session id, a window number, or 'agent-<id>'."""
+    """Accept a full/prefix session id, a window number ('32', 'w32', 'window 32'), or 'agent-<id>'."""
+    m = WINDOW_REF_RE.fullmatch(ident)
+    if m:
+        ident = m.group(1)
     if ident.isdigit():
         row = conn.execute("SELECT session_id FROM windows WHERE window = ?", (int(ident),)).fetchone()
         if row is None:
@@ -348,6 +357,25 @@ def cmd_sessions(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     return 0
 
 
+def _created_date(v: Any) -> Optional[str]:
+    """createdAt as 'YYYY-MM-DD HH:MM:SS' (UTC): accepts epoch milliseconds or seconds (number or digit
+    string) and ISO-8601 strings; None if it is neither."""
+    if v is None or v == "":
+        return None
+    t = str(v).strip()
+    if re.fullmatch(r"-?\d+(\.\d+)?", t):
+        x = float(t)
+        if abs(x) >= 1e11:          # milliseconds (seconds stay below 1e11 until the year 5138)
+            x /= 1000.0
+        try:
+            return _dt.datetime.fromtimestamp(x, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except (OverflowError, OSError, ValueError):
+            return None
+    if re.match(r"\d{4}-\d{2}-\d{2}", t):
+        return t[:19].replace("T", " ")
+    return None
+
+
 def cmd_windows(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     if a.index:
         n = Ingester(conn).load_index(a.index)
@@ -355,19 +383,26 @@ def cmd_windows(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
             sys.stderr.write("loaded %d index entries from %s\n" % (n, a.index))
     rows = conn.execute(
         """SELECT w.*, s.n_messages AS n_messages, s.first_ts AS first_ts, s.last_ts AS last_ts, s.thread_id AS thread_id
-           FROM windows w LEFT JOIN sessions s ON s.session_id = w.session_id
-           ORDER BY (w.window IS NULL), w.window, COALESCE(w.created_at, '')""").fetchall()
+           FROM windows w LEFT JOIN sessions s ON s.session_id = w.session_id""").fetchall()
     if not rows and not a.json:
         print("no window map: run `mem ingest --index DIR` or `mem windows --index DIR`")
         return 1
+    # sort by date (createdAt, else the session's first message), then window number
+    dated = []
     for w in rows:
+        d = _created_date(w["created_at"]) or (_date(w["first_ts"], True) if w["first_ts"] else None)
+        dated.append((d or "9999", w["window"] if w["window"] is not None else 10 ** 9, w["session_id"], d, w))
+    dated.sort(key=lambda x: x[:3])
+    for _, _, _, d, w in dated:
         if a.json:
-            _emit({k: w[k] for k in w.keys()})
+            r = {k: w[k] for k in w.keys()}
+            r["date"] = d
+            _emit(r)
             continue
         print("%-5s %s  %s  %s  %s" % (
-            ("w%d" % w["window"]) if w["window"] is not None else "-", _date(w["created_at"], True),
+            ("w%d" % w["window"]) if w["window"] is not None else "-", (d or "-").ljust(19),
             w["session_id"][:8], "%4s msg" % (w["n_messages"] if w["n_messages"] is not None else "?"),
-            _one_line(w["title"] or "-", 70)))
+            _one_line(w["title"] or "(untitled)", 70)))
     return 0
 
 
@@ -467,6 +502,12 @@ def _node_line(n: sqlite3.Row, width: int = 90) -> str:
 
 
 def _resolve_node(conn: sqlite3.Connection, words: List[str]) -> sqlite3.Row:
+    words = " ".join(words).split()              # "window 32" given as one quoted token works too
+    m = WINDOW_REF_RE.fullmatch(" ".join(words))
+    if m:
+        words = ["window", m.group(1)]
+    if not words:
+        raise SystemExit("usage: mem describe <session-id | window N | thread ID | node ID>")
     kind, val = (None, words[0]) if len(words) == 1 else (words[0], words[1])
     if len(words) > 2 or (kind is not None and kind not in ("window", "session", "thread", "node")):
         raise SystemExit("usage: mem describe <session-id | window N | thread ID | node ID>")
@@ -632,6 +673,8 @@ def cmd_flags(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     statuses = [a.status] if a.status else ["flagged", "manual"]
     rows = conn.execute("SELECT * FROM nodes WHERE status IN (%s) ORDER BY status, level, COALESCE(first_ts, ''), id" %
                         ",".join("?" * len(statuses)), statuses).fetchall()
+    if a.export:
+        return _export_flags(conn, rows, a)
     for n in rows:
         meta = json.loads(n["metrics_json"] or "{}")
         report = meta.get("report") or {}
@@ -652,11 +695,104 @@ def cmd_flags(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     return 0
 
 
+def _export_flags(conn: sqlite3.Connection, rows: List[sqlite3.Row], a: argparse.Namespace) -> int:
+    """One <node-id>.md per node: span, metrics and the raw pack text, so a summary can be written with the
+    source in front of you. Write the summary to <node-id>.summary.md and load it with `mem manual --import DIR`."""
+    os.makedirs(a.export, exist_ok=True)
+    for n in rows:
+        meta = json.loads(n["metrics_json"] or "{}")
+        report = meta.get("report") or {}
+        pack = make_pack(conn, n)
+        lines = ["# %s  (%s, %s)" % (n["id"], n["level"], n["status"]), "",
+                 "- span: %s" % _span(n), "- thread: %s  session: %s" % (n["thread_id"] or "-", n["session_id"] or "-"),
+                 "- sources: %d (%d bytes)  attempts: %d  sensitivity: %s" % (
+                     n["n_sources"], n["source_bytes"], n["attempts"], meta.get("sensitivity", "normal")), "",
+                 "## Why it was flagged", ""]
+        lines += ["- " + l for l in (_explain(report) or ["(no metrics recorded)"])]
+        lines += ["", "## Metrics", "", "```json",
+                  json.dumps({"report": report, "history": meta.get("history", []), "usage": meta.get("usage")},
+                             indent=2, sort_keys=True), "```", "", "## Last output (rejected)", "",
+                  n["summary"] or "(none)", "", "## Source (what the summarizer was shown)", "", "```text",
+                  pack.text if pack is not None else "(parts not built yet: " + ", ".join(
+                      "%s %s" % (k["id"], k["status"]) for k in children_of(conn, n["id"])) + ")", "```", "",
+                 "Write the summary to %s.summary.md in this directory, then run: mem manual --import %s" % (n["id"], a.export), ""]
+        with open(os.path.join(a.export, n["id"] + ".md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    if a.json:
+        _emit({"exported": len(rows), "dir": a.export})
+    else:
+        print("exported %d node(s) to %s" % (len(rows), a.export))
+    return 0
+
+
+def _find_node(conn: sqlite3.Connection, ident: str) -> sqlite3.Row:
+    rows = conn.execute("SELECT * FROM nodes WHERE id = ? OR id LIKE ? ORDER BY id", (ident, ident + "%")).fetchall()
+    exact = [r for r in rows if r["id"] == ident]
+    if exact:
+        return exact[0]
+    if len(rows) == 1:
+        return rows[0]
+    if rows:
+        raise SystemExit("ambiguous node id %r: %s" % (ident, ", ".join(r["id"] for r in rows[:8])))
+    raise SystemExit("no such node: %s" % ident)
+
+
+def cmd_manual(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
+    """Enter an operator-written summary for a node (usually a `manual` one)."""
+    if not _need_nodes(conn):
+        return 1
+    jobs = []     # (node, text)
+    if a.import_dir:
+        if a.node or a.text is not None or a.file or a.stdin:
+            raise SystemExit("--import DIR takes no node id and no --text/--file/--stdin")
+        if not os.path.isdir(a.import_dir):
+            raise SystemExit("not a directory: %s" % a.import_dir)
+        for fn in sorted(os.listdir(a.import_dir)):
+            if not fn.endswith(".summary.md"):
+                continue
+            with open(os.path.join(a.import_dir, fn), "r", encoding="utf-8") as f:
+                text = f.read().strip()
+            if not text:
+                sys.stderr.write("skipped %s: empty\n" % fn)
+                continue
+            jobs.append((_find_node(conn, fn[: -len(".summary.md")]), text))
+    else:
+        if not a.node:
+            raise SystemExit("usage: mem manual <node ID> (--text TEXT | --file PATH | --stdin)   or   mem manual --import DIR")
+        given = [x for x in (a.text is not None, bool(a.file), a.stdin) if x]
+        if len(given) != 1:
+            raise SystemExit("give exactly one of --text, --file, --stdin")
+        if a.text is not None:
+            text = a.text
+        elif a.file:
+            with open(a.file, "r", encoding="utf-8") as f:
+                text = f.read()
+        else:
+            text = sys.stdin.read()
+        if not text.strip():
+            raise SystemExit("the summary is empty")
+        jobs.append((_find_node(conn, a.node), text))
+    for node, text in jobs:
+        set_manual_summary(conn, node, text)
+        if a.json:
+            _emit({"node": node["id"], "status": "ok", "backend": "manual", "model": "human"})
+        else:
+            print("%s: stored manual summary (%d bytes); was %s" % (node["id"], len(text.strip().encode("utf-8")), node["status"]))
+    conn.commit()
+    if jobs and not a.json:
+        print("run `mem build` to rebuild the nodes above these that were built over a placeholder")
+    return 0
+
+
 def cmd_build(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     levels = list(dag.LEVELS) if a.all or a.level == "all" else [a.level]
     budget = a.budget_usd if a.budget_usd is not None else (float(os.environ["MEM_BUDGET_USD"]) if os.environ.get("MEM_BUDGET_USD") else None)
     backend = a.backend or os.environ.get("MEM_BACKEND") or "stub"
-    summarizer = make_summarizer(backend, budget_usd=budget)
+    rerun = {k: v for k, v in (("leaf", a.rerun_model_leaf), ("upper", a.rerun_model_upper)) if v}
+    summarizer = make_summarizer(backend, budget_usd=budget, rerun_models=rerun or None)
+    workers = a.workers if a.workers is not None else int(os.environ.get("MEM_WORKERS") or 1)
+    if workers < 1:
+        raise SystemExit("--workers must be at least 1")
     if a.reset_backend:
         ids = [r[0] for r in conn.execute("SELECT id FROM nodes WHERE backend = ?", (a.reset_backend,))]
         if not a.dry_run:
@@ -674,7 +810,7 @@ def cmd_build(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     chunk = a.chunk_bytes or int(os.environ.get("MEM_CHUNK_BYTES", dag.DEFAULT_CHUNK_BYTES))
     log = (lambda m: sys.stderr.write(m + "\n")) if a.verbose else (lambda m: None)
     res = run_build(conn, summarizer, BuildOptions(levels=levels, thread_ids=scope, chunk_bytes=chunk, limit=a.limit,
-                                                   dry_run=a.dry_run), log=log)
+                                                   dry_run=a.dry_run, workers=workers), log=log)
     if a.json:
         _emit(res)
     elif a.dry_run:
@@ -686,7 +822,8 @@ def cmd_build(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
             print("%-8s %6d %8d %12d %12d %10s" % (lv, p["nodes"], p["pending"], p["source_bytes"], p["est_input_tokens"],
                                                   ("%.4f" % p["est_cost_usd"]) if backend == "anthropic" else "-"))
     else:
-        print("build (backend %s): %d accepted, %d manual%s" % (backend, res["built"], res["manual"],
+        print("build (backend %s, %d worker%s): %d accepted, %d manual%s" % (
+            backend, workers, "" if workers == 1 else "s", res["built"], res["manual"],
                                                               ", %d accepted after a rerun" % res["flagged_then_ok"] if res["flagged_then_ok"] else ""))
         for lv, c in res["levels"].items():
             print("  %-8s ok %d  manual %d  not ready %d" % (lv, c["ok"], c["manual"], c["not_ready"]))
@@ -763,6 +900,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
     p.add_argument("--limit", type=int, default=0, help="build at most N nodes this run")
     p.add_argument("--chunk-bytes", type=int, help="leaf prose budget in bytes (default 24576 or $MEM_CHUNK_BYTES)")
+    p.add_argument("--workers", type=int, help="summarizer calls in flight at once within a level (default $MEM_WORKERS or 1)")
+    p.add_argument("--rerun-model-leaf", metavar="MODEL", help="model for a leaf rerun (default $MEM_MODEL_RERUN_LEAF or the mid model)")
+    p.add_argument("--rerun-model-upper", metavar="MODEL", help="model for a session/thread/month rerun (default $MEM_MODEL_RERUN_UPPER or the mid model)")
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(fn=cmd_build)
 
@@ -783,7 +923,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("flags", help="list flagged / manual nodes with their detector metrics")
     p.add_argument("--status", choices=["flagged", "manual"])
+    p.add_argument("--export", metavar="DIR", help="write one <node-id>.md per node (span, metrics, raw pack text) into DIR")
     p.set_defaults(fn=cmd_flags)
+
+    p = sub.add_parser("manual", help="store an operator-written summary for a node (or --import DIR of <node-id>.summary.md)")
+    p.add_argument("node", nargs="?", help="node id (or unique prefix)")
+    p.add_argument("--text", help="the summary text")
+    p.add_argument("--file", help="read the summary from this file")
+    p.add_argument("--stdin", action="store_true", help="read the summary from standard input")
+    p.add_argument("--import", dest="import_dir", metavar="DIR", help="import every <node-id>.summary.md in DIR")
+    p.set_defaults(fn=cmd_manual)
     return ap
 
 

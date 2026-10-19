@@ -164,7 +164,8 @@ def test_windows(capsys, dbpath, corpus, tmp_path):
     assert {r["session_id"] for r in rows} == set(expected)
     nums = [r["window"] for r in rows if r["window"] is not None]
     assert nums == sorted(nums) and len(nums) == sum(1 for w in expected.values() if w["window"])
-    assert all(r["window"] is None for r in rows[len(nums):])
+    dates = [r["date"] or "9999" for r in rows]           # `mem windows` now sorts by date (unnumbered windows included)
+    assert dates == sorted(dates)
     for r in rows:
         assert r["title"] == expected[r["session_id"]]["title"] and r["window"] == expected[r["session_id"]]["window"]
         assert r["created_at"] == expected[r["session_id"]]["createdAt"]
