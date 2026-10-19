@@ -133,10 +133,19 @@ def test_coverage_leaf_session_thread_month_tree(built):
             assert tn["level"] == "session" and json.loads(tn["metrics_json"]).get("thread_double") is True
         else:
             assert tn["level"] == "thread" and all(s["parent_id"] == tn["id"] for s in sess)
-    # months: thread-level nodes grouped by first_ts month
+    # months: thread-level nodes grouped by (first_ts month, thread kind); the kind is on the thread row and the node
+    kinds = {r[0]: r[1] for r in c.execute("SELECT thread_id, kind FROM threads")}
     for n in nodes.values():
         if n["level"] in ("thread",) or (n["level"] == "session" and json.loads(n["metrics_json"]).get("thread_double")):
-            assert nodes[n["parent_id"]]["id"] == "M-" + dag.month_of(n["first_ts"])
+            kind = kinds[n["thread_id"]]
+            assert kind in dag.THREAD_KINDS and json.loads(n["metrics_json"]).get("kind") == kind
+            assert nodes[n["parent_id"]]["id"] == dag.month_node_id(dag.month_of(n["first_ts"]), kind)
+    # the fixtures open some sessions with scheduled-task triggers, so both kinds of month node exist
+    month_kinds = {json.loads(n["metrics_json"]).get("kind") for n in nodes.values() if n["level"] == "month"}
+    assert month_kinds == {"hearth", "scheduled"}
+    sched = c.execute("SELECT COUNT(*) FROM threads WHERE kind = 'scheduled'").fetchone()[0]
+    opened = c.execute("""SELECT COUNT(DISTINCT thread_id) FROM sessions WHERE is_subagent = 0 AND opener = 'scheduled'""").fetchone()[0]
+    assert 0 < sched <= opened
 
 
 def test_describe_summary_text_is_stored_and_indexed(built):
@@ -163,7 +172,7 @@ def test_dry_run_writes_nothing_even_the_tables(corpus, tmp_path):
     conn = fresh_conn(corpus, tmp_path)
     assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='nodes'").fetchone() is None
     r = run_build(conn, StubSummarizer(), BuildOptions(dry_run=True))
-    assert r["plan"]["leaf"]["pending"] > 0 and r["plan"]["month"]["pending"] == 1
+    assert r["plan"]["leaf"]["pending"] > 0 and r["plan"]["month"]["pending"] >= 1   # one per (month, kind)
     assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='nodes'").fetchone() is None
 
 

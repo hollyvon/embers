@@ -75,10 +75,42 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     can wrap it in a transaction it later rolls back (`mem build --dry-run`)."""
     for stmt in DAG_STATEMENTS:
         conn.execute(stmt)
+    cols = set(r[1] for r in conn.execute("PRAGMA table_info(threads)"))
+    if cols and "kind" not in cols:          # (no threads table at all = a bare Layer-D test DB)
+        conn.execute("ALTER TABLE threads ADD COLUMN kind TEXT")   # 'hearth' | 'scheduled' (see thread_kinds)
+
+
+THREAD_KINDS = ("hearth", "scheduled")
+
+
+def thread_kinds(conn: sqlite3.Connection) -> Dict[str, str]:
+    """thread_id -> 'scheduled' when the thread's earliest non-subagent session was opened by a
+    scheduled-task trigger (an unattended automated run), else 'hearth' (a live conversation). The
+    distinction keeps automated runs from swamping the month view: each month gets one node per kind."""
+    rows = conn.execute("""SELECT thread_id, opener FROM sessions WHERE is_subagent = 0 AND thread_id IS NOT NULL
+                           ORDER BY thread_id, first_ts""").fetchall()
+    kinds: Dict[str, str] = {}
+    for tid, opener in rows:
+        if tid not in kinds:
+            kinds[tid] = "scheduled" if opener == "scheduled" else "hearth"
+    return kinds
+
+
+def _set_kind(conn: sqlite3.Connection, nid: str, kind: str) -> None:
+    row = conn.execute("SELECT metrics_json FROM nodes WHERE id = ?", (nid,)).fetchone()
+    meta = json.loads((row[0] if row else None) or "{}")
+    if meta.get("kind") != kind:
+        meta["kind"] = kind
+        conn.execute("UPDATE nodes SET metrics_json = ? WHERE id = ?", (json.dumps(meta), nid))
 
 
 def node_id(prefix: str, key: str) -> str:
     return prefix + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+
+
+def month_node_id(mon: str, kind: str = "hearth") -> str:
+    """'M-2026-10' for the hearth (live conversations), 'M-2026-10-scheduled' for unattended runs."""
+    return "M-" + mon + ("" if kind == "hearth" else "-" + kind)
 
 
 def month_of(ts: Optional[str]) -> str:
@@ -368,20 +400,25 @@ def sync_upper(conn: sqlite3.Connection, months: bool = True) -> Dict[str, int]:
             _drop_node(conn, r[0])
             stats["removed"] += 1
     # a session node that doubles as its thread node is flagged so; others lose a stale flag
+    kinds = thread_kinds(conn)
     for tid, pid in thread_level.items():
         for sn in by_thread[tid]:
             _flag_double(conn, sn["id"], pid == sn["id"])
-    # months
+        kind = kinds.get(tid, "hearth")
+        conn.execute("UPDATE threads SET kind = ? WHERE thread_id = ?", (kind, tid))
+        _set_kind(conn, pid, kind)
+    # months: one node per (month, kind) so unattended runs never swamp the hearth's month
     if months:
         tl = _rows(conn, thread_level.values())
-        by_month: Dict[str, List[sqlite3.Row]] = {}
+        by_month: Dict[Tuple[str, str], List[sqlite3.Row]] = {}
         for tid, pid in thread_level.items():
-            by_month.setdefault(month_of(tl[pid]["first_ts"]), []).append(tl[pid])
+            by_month.setdefault((month_of(tl[pid]["first_ts"]), kinds.get(tid, "hearth")), []).append(tl[pid])
         month_nodes = set()
-        for mon, rows in by_month.items():
+        for (mon, kind), rows in by_month.items():
             rows.sort(key=order)
-            pid = "M-" + mon
+            pid = month_node_id(mon, kind)
             _ensure_parent(conn, pid, "month", rows, None, None)
+            _set_kind(conn, pid, kind)
             month_nodes.add(pid)
             stats["month"] += 1
         for r in conn.execute("SELECT id FROM nodes WHERE level = 'month'").fetchall():

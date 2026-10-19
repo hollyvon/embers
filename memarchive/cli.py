@@ -570,7 +570,8 @@ def cmd_describe(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     print("%s  %s  %s  %s  %d source%s (%d bytes)  model=%s backend=%s%s" % (
         n["id"], n["level"], _date(n["first_ts"], True) + " -> " + _date(n["last_ts"], True), n["status"],
         n["n_sources"], "" if n["n_sources"] == 1 else "s", n["source_bytes"], n["model"] or "-", n["backend"] or "-",
-        "  [thread: this session is the whole thread]" if meta.get("thread_double") else ""))
+        ("  [thread: this session is the whole thread]" if meta.get("thread_double") else "")
+        + ("  kind=%s" % meta["kind"] if meta.get("kind") else "")))
     print("  thread %s%s%s" % ((n["thread_id"] or "-")[:8], "  session %s" % session[:8] if session else "",
                               "  window w%s" % win if win is not None else ""))
     print()

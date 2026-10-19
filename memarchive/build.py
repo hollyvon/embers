@@ -77,7 +77,11 @@ def children_of(conn: sqlite3.Connection, node_id: str) -> List[sqlite3.Row]:
 
 def upper_pack(node: sqlite3.Row, children: List[sqlite3.Row], meta: Dict[str, Any]) -> PromptPack:
     segments = []
-    lines = ["LEVEL: %s   SPAN: %s   PARTS: %d" % (node["level"], _span(node["first_ts"], node["last_ts"]), len(children)),
+    kind = meta.get("kind")
+    kind_note = {"hearth": "   KIND: hearth (live conversations)",
+                 "scheduled": "   KIND: scheduled (unattended automated runs)"}.get(kind, "")
+    lines = ["LEVEL: %s   SPAN: %s   PARTS: %d%s" % (node["level"], _span(node["first_ts"], node["last_ts"]),
+                                                     len(children), kind_note),
              "--- parts ---"]
     for i, ch in enumerate(children, start=1):
         if ch["status"] == "ok":
