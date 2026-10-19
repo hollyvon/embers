@@ -9,7 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sqlite3
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import dag
 from .dag import LEVELS, READY, PROSE_CLASSES
@@ -157,10 +157,11 @@ class Builder:
             self._since[level] = 0
         return self._baselines[level]
 
-    def process(self, node: sqlite3.Row, pack: PromptPack, kids: Optional[List[sqlite3.Row]]) -> str:
+    def process(self, node: sqlite3.Row, pack: PromptPack, kids: Optional[List[sqlite3.Row]]) -> Tuple[str, int]:
         """Summarize one node: first attempt (small tier for leaves, mid above), one rerun on mid if the
         flinch detector rejects it, then manual. Each outcome is committed, so an interruption between
-        the attempts leaves the node `flagged` and the next build goes straight to the rerun."""
+        the attempts leaves the node `flagged` and the next build goes straight to the rerun.
+        Returns (final status, number of rejected summaries)."""
         conn = self.conn
         failures = node["attempts"]
         history: List[Dict[str, Any]] = json.loads(node["metrics_json"] or "{}").get("history", []) if failures else []
@@ -181,14 +182,14 @@ class Builder:
                 _store(conn, node, pack, res, "ok", failures, report, history, kids)
                 self._since[node["level"]] = self._since.get(node["level"], 0) + 1
                 conn.commit()
-                return "ok"
+                return "ok", failures
             failures += 1
             status = "manual" if attempt == 1 else "flagged"
             _store(conn, node, pack, res, status, failures, report, history, kids)
             conn.commit()
             self.log("%s %s %s: failed %s" % (node["level"], node["id"], "-> manual" if status == "manual" else
                                               "-> rerun on mid", ",".join(report.failed)))
-        return "manual"
+        return "manual", failures
 
 
 def run_build(conn: sqlite3.Connection, summarizer: Summarizer, opts: BuildOptions,
@@ -223,13 +224,12 @@ def run_build(conn: sqlite3.Connection, summarizer: Summarizer, opts: BuildOptio
                     out["not_ready"] += 1
                     continue
                 kids = children_of(conn, node["id"]) if level != "leaf" else None
-                reran = node["attempts"] > 0
-                status = b.process(node, pack, kids)
+                status, failures = b.process(node, pack, kids)
                 done += 1
                 lv[status] += 1
                 out["built"] += 1 if status == "ok" else 0
                 out["manual"] += 1 if status == "manual" else 0
-                if status == "ok" and reran:
+                if status == "ok" and failures:
                     out["flagged_then_ok"] += 1
     except StopIteration:
         pass
