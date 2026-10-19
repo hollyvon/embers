@@ -306,3 +306,15 @@ def test_high_sensitivity_engages_when_a_thinking_block_is_in_the_source(built):
     # sensitivity propagates upward
     parent = c.execute("SELECT * FROM nodes WHERE id = ?", (hi["parent_id"],)).fetchone()
     assert json.loads(parent["metrics_json"])["sensitivity"] == "high"
+
+
+def test_stub_passes_the_detector_on_another_corpus_seed(tmp_path):
+    """Seed 99 has leaves that are mostly thinking text; the stub must not trip the guard on them."""
+    from fixtures.gen import generate
+    out = str(tmp_path / "fx99")
+    generate(out, seed=99)
+    conn = open_db(str(tmp_path / "s99.db"))
+    Ingester(conn).ingest([os.path.join(out, "root1"), os.path.join(out, "root2")])
+    r = run_build(conn, StubSummarizer(), BuildOptions())
+    assert r["manual"] == 0 and r["stopped"] is None
+    assert conn.execute("SELECT COUNT(*) FROM nodes WHERE status != 'ok'").fetchone()[0] == 0

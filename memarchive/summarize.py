@@ -116,13 +116,13 @@ class StubSummarizer(Summarizer):
                 if n in w:
                     take(i)
                     break
-        # 2. first sentence of every human/assistant block (thinking is used for coverage only)
+        # 2. first sentence of every human/assistant block
         for i, (bi, si, _, kind) in enumerate(sents):
             if si == 0 and kind != "thinking" and used < target:
                 take(i)
-        # 3. evenly spread filler (stride passes, halving) until the target is reached
+        # 3. evenly spread filler (any class, thinking included) until the target is reached
         if used < target:
-            rest = [i for i, x in enumerate(sents) if x[3] != "thinking" and i not in chosen]
+            rest = [i for i in range(len(sents)) if i not in chosen]
             stride = 1
             while stride * 2 <= len(rest):
                 stride *= 2
