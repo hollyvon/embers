@@ -61,6 +61,24 @@ class Block:
         return "Block(%s/%s %r)" % (self.cls, self.block_type, self.text[:40])
 
 
+def sanitize(obj: Any) -> Any:
+    """Replace lone UTF-16 surrogates (e.g. a prompt truncated mid-emoji, escaped as
+    ``\\ud83d`` in the JSONL) with U+FFFD, recursively. SQLite rejects such strings
+    (``UnicodeEncodeError: surrogates not allowed``). Seen once in a real corpus, in a
+    ``last-prompt`` record; applied to every parsed record at the ingest boundary."""
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+            return obj
+        except UnicodeEncodeError:
+            return obj.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    if isinstance(obj, list):
+        return [sanitize(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: sanitize(v) for k, v in obj.items()}
+    return obj
+
+
 def _s(v: Any) -> str:
     """Coerce a possibly-missing text value to str."""
     if v is None:

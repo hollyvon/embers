@@ -25,7 +25,7 @@ import sqlite3
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .records import (META_LAST_WINS, Block, agent_id_from_tool_use_result, extract_blocks, is_human_prompt,
+from .records import (META_LAST_WINS, Block, agent_id_from_tool_use_result, extract_blocks, is_human_prompt, sanitize,
                       opener_kind, record_text_of_user_content)
 
 SCHEMA_VERSION = 1
@@ -417,7 +417,7 @@ class Ingester:
                 offset += n
                 r["line_count"] += 1
                 r["parsed_bytes"] = offset
-                self._handle(fi, rec, r["line_count"], r, seen_in_file)
+                self._handle(fi, sanitize(rec), r["line_count"], r, seen_in_file)
         return r
 
     def _handle(self, fi: FileInfo, rec: Dict[str, Any], line_no: int, r: Dict[str, Any], seen: set) -> None:

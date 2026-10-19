@@ -183,3 +183,25 @@ def test_unknown_record_types_and_keys_tolerated():
     assert extract_blocks({}) == []
     rec = user("hi", xUnknown={"a": [1, {"b": None}]}, slug="x")
     assert classes(rec) == [("human", "text")]
+
+
+def test_lone_surrogates_are_sanitized(tmp_path):
+    """A string truncated mid-emoji decodes from JSON as a lone surrogate, which SQLite
+    cannot store. sanitize() must replace it and leave valid text (incl. full emoji) alone."""
+    import json
+    import sqlite3
+    from memarchive.records import sanitize
+
+    raw = b'{"type":"last-prompt","lastPrompt":"abc \\ud83d","nested":{"ok":"\\ud83d\\ude00 fine","xs":["\\udc00"]}}'
+    rec = json.loads(raw)
+    with pytest.raises(UnicodeEncodeError):
+        rec["lastPrompt"].encode("utf-8")
+    clean = sanitize(rec)
+    assert clean["lastPrompt"] == "abc �"
+    assert clean["nested"]["ok"] == "\U0001f600 fine"
+    assert clean["nested"]["xs"] == ["�"]
+    assert clean["type"] == "last-prompt"
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t(v TEXT)")
+    conn.execute("INSERT INTO t VALUES (?)", (clean["lastPrompt"],))   # no UnicodeEncodeError
+    assert sanitize(rec) is not rec and sanitize("plain") == "plain" and sanitize(7) == 7
