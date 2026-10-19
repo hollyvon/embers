@@ -772,13 +772,15 @@ class Planner:
         plants = [["human", "assistant"], ["thinking"], ["tool_result"], ["attachment"]]
         originals: List[str] = []
         # 28 original sessions; ~35% scheduled; ~10% compacted; subagents from a handful of parents
+        targets = [r.randint(5, 9) if i in (3, 9, 17) else size() for i in range(28)]
+        # subagent parents: the five longest originals, two Agent calls each (~16% of files)
+        agent_parents = set(sorted(range(28), key=lambda i: -targets[i])[:5])
         for i in range(28):
             scheduled = r.random() < 0.35
             n_compact = r.randint(1, 3) if i in (0, 5, 11, 19) else 0
             plant = plants.pop(0) if plants else None
-            agent_budget = 3 if i in (2, 7, 13, 21) else 0
-            target = r.randint(5, 9) if i in (3, 9, 17) else size()
-            originals.append(self.new_session(target, scheduled, n_compact, plant, agent_budget))
+            agent_budget = 2 if i in agent_parents else 0
+            originals.append(self.new_session(targets[i], scheduled, n_compact, plant, agent_budget))
         # resume/fork chain A -> B -> C (C copies B's whole content, which includes A's prefix)
         a = originals[0]
         n_a = len(self.sessions[a]["records"])
