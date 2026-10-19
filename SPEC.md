@@ -32,3 +32,9 @@ A DAG of hierarchical summaries (leaf = session-chunk → session → month). Na
 - **P1:** fixture generator + ingest + FTS + `mem` CLI + tests. Deliverable: standalone-useful search.
 - **P2:** DAG builder + quality guard, exercised on fixtures; operator runs against real corpus locally.
 - **P3:** full-corpus runs + an in-session usage guide. Operator-side.
+
+## Addendum (2026-10-19) — from the Phase 0 recon
+- **Multiple corpus roots.** The ingester takes a LIST of root directories, each laid out as `<root>/<projdir>/<session>.jsonl` (+ `<projdir>/<session>/subagents/agent-<id>.jsonl`). Real deployments have at least two roots (a primary transcript folder and a sandbox-style folder whose `cwd` values look like `/sessions/<adjective-noun>/`). Fixtures must include ≥2 roots.
+- **Window map.** A separate metadata index exists outside the roots: one small JSON per session with `createdAt`, `title`, `cwd`, and `cliSessionId` (= the JSONL filename stem). `mem windows` builds the human-numbered window map from these titles. Fixtures: emit a parallel `sessions-index/` of such files.
+- **Thinking blocks are indexed, in their own class** (`block_class = thinking`), never dropped; search includes/excludes the class explicitly; the flinch-detector treats this class as highest sensitivity.
+- **No `summary` records and no top-level `tool_result` records exist in current schema** (see docs/P0-schema-recon.md §c). Compaction is in-file (`compact_boundary` + `isCompactSummary`); resume is prefix-copy; stitch by uuid overlap. Keep tolerance for legacy `summary` records.
