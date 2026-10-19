@@ -154,6 +154,7 @@ class Ctx:
         self.clock = Clock(_dt.datetime(2026, 3, 2, 8, 0, 0))
         self.origin_file: Dict[str, str] = {}   # uuid -> relpath of the file that generated it
         self.planted: List[Dict[str, Any]] = []
+        self.human_uuids: set = set()           # every uuid generated as a human prompt
         self.phrase_n = 0
 
     def phrase(self) -> str:
@@ -262,6 +263,7 @@ class Conv:
         self.push(rec)
         if human:
             self.human_uuids.append(rec["uuid"])
+            self.ctx.human_uuids.add(rec["uuid"])
         self.noise()
         return rec
 
@@ -774,7 +776,7 @@ class Planner:
             scheduled = r.random() < 0.35
             n_compact = r.randint(1, 3) if i in (0, 5, 11, 19) else 0
             plant = plants.pop(0) if plants else None
-            agent_budget = 2 if i in (2, 7, 13, 21) else 0
+            agent_budget = 3 if i in (2, 7, 13, 21) else 0
             target = r.randint(5, 9) if i in (3, 9, 17) else size()
             originals.append(self.new_session(target, scheduled, n_compact, plant, agent_budget))
         # resume/fork chain A -> B -> C (C copies B's whole content, which includes A's prefix)
@@ -804,7 +806,10 @@ class Planner:
     def apply_edge_cases(self) -> None:
         r = self.rng
         tops = [rel for rel, s in self.sessions.items() if "subagent_of" not in s]
-        big = [rel for rel in tops if len(self.sessions[rel]["records"]) >= 40]
+        sources = {c["source"] for c in self.truth["copies"]}
+        # edge cases go into files nobody copied from, so appending to them cannot
+        # move a copy source's last timestamp past its copies (the canonical-owner rule)
+        big = [rel for rel in tops if len(self.sessions[rel]["records"]) >= 40 and rel not in sources]
         huge_rel = big[0]
         trunc_rels = [big[1], big[2]]
         dup_rel = big[3]
@@ -844,6 +849,13 @@ class Planner:
             for x in s["records"][:n]:
                 tcounts[x.get("type", "?")] = tcounts.get(x.get("type", "?"), 0) + 1
             conv = s["conv"]
+            first_user = next((x for x in s["records"][:n] if x.get("type") == "user"), None)
+            opener = ""
+            if first_user is not None:
+                c = first_user.get("message", {}).get("content")
+                opener = c if isinstance(c, str) else "".join(
+                    b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+            s["scheduled"] = opener.lstrip().startswith("<scheduled-task")
             info: Dict[str, Any] = {
                 "session_id": s["session_id"], "root": s["root"], "projdir": s["projdir"], "cwd": s["cwd"],
                 "complete_lines": n, "truncated_tail": trunc, "copied_records": s["copied"],
@@ -852,7 +864,9 @@ class Planner:
                 "is_subagent": "subagent_of" in s,
             }
             if conv is not None:
-                info["human_prompt_uuids"] = [u for u in conv.human_uuids if any(x.get("uuid") == u for x in s["records"][:n])]
+                # every human prompt in the file, including ones inside a copied prefix
+                info["human_prompt_uuids"] = [x["uuid"] for x in s["records"][:n]
+                                              if x.get("uuid") in self.ctx.human_uuids]
                 info["final_title"] = conv.final_title
                 info["final_last_prompt"] = conv.final_last_prompt
                 info["final_mode"] = conv.final_mode
