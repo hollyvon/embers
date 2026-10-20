@@ -172,6 +172,18 @@ def opener_kind(first_user_text: Optional[str]) -> str:
     return "plain"
 
 
+def _embedded_base64(v: Any) -> Optional[str]:
+    """Return the base64 payload if `v` is (or wraps, one or two dicts deep) a {"base64": ...}."""
+    if not isinstance(v, dict):
+        return None
+    if isinstance(v.get("base64"), str):
+        return v["base64"]
+    for inner in v.values():
+        if isinstance(inner, dict) and isinstance(inner.get("base64"), str):
+            return inner["base64"]
+    return None
+
+
 def _image_block(cls: str, b: Dict[str, Any], jsonpath: str) -> Block:
     src = b.get("source") if isinstance(b.get("source"), dict) else {}
     data = src.get("data")
@@ -212,7 +224,14 @@ def extract_blocks(rec: Dict[str, Any]) -> List[Block]:
             if isinstance(v, str) and v:
                 parts.append(v)
             elif v is not None and not isinstance(v, str):
-                parts.append(_s(v))
+                payload = _embedded_base64(v)
+                if payload is not None:
+                    # e.g. {"file": {"base64": ...}} — a pasted PDF/document carried as an
+                    # attachment record. Pointer only, like image/document content blocks.
+                    out.append(Block("attachment", at, "", skipped_kind="document",
+                                     skipped_bytes=_nbytes(payload), jsonpath="attachment." + key))
+                else:
+                    parts.append(_s(v))
         entries = att.get("entries")
         if isinstance(entries, list):
             for e in entries:

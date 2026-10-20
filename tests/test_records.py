@@ -205,3 +205,13 @@ def test_lone_surrogates_are_sanitized(tmp_path):
     conn.execute("CREATE TABLE t(v TEXT)")
     conn.execute("INSERT INTO t VALUES (?)", (clean["lastPrompt"],))   # no UnicodeEncodeError
     assert sanitize(rec) is not rec and sanitize("plain") == "plain" and sanitize(7) == 7
+
+
+def test_attachment_base64_payload_is_pointer_only():
+    rec = {"type": "attachment", "uuid": "x",
+           "attachment": {"type": "file", "content": {"file": {"base64": "JVBERi0x" * 100}}}}
+    bs = extract_blocks(rec)
+    assert len(bs) == 1
+    b = bs[0]
+    assert b.cls == "attachment" and b.text == ""
+    assert b.skipped_kind == "document" and b.skipped_bytes == 800
