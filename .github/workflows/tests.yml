@@ -6,11 +6,16 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.12"]
+        include:
+          # ubuntu-latest no longer ships 3.9; the 22.04 image still does.
+          - python-version: "3.9"
+            os: ubuntu-22.04
+          - python-version: "3.12"
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
