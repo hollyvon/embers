@@ -1,4 +1,4 @@
-# Memory Archive — engineering spec (v0.1)
+# Embers — engineering spec (v0.1)
 
 A local-first searchable archive over Claude Code session transcripts (JSONL). Two layers: full-text search for exact recall, hierarchical DAG summaries for orientation. **All real transcript data stays on the owner's machine, forever. This repo holds tooling and synthetic fixtures only.**
 
@@ -15,7 +15,7 @@ A DAG of hierarchical summaries (leaf = session-chunk → session → month). Na
 ## Components
 
 1. **`ingest.py`** — walks a transcripts root (`~/.claude/projects/*/*.jsonl` convention), normalizes (session id, ts, role, text), writes SQLite (`sessions`, `messages`, FTS5). Incremental via (path, mtime, size) watermark. Append-only; never touches sources. Must handle: tool-call noise (index prose + tool-result text, skip base64/binary payloads) and compaction-continuation chains (continued sessions = one logical thread, stitched via continuation metadata).
-2. **`mem` CLI** — `mem search "query" [--since DATE]` · `mem session <id> [--around <hit>]` · `mem sessions` (list/map). Later: `mem describe` / `mem expand` (Layer D).
+2. **`embers` CLI (alias `mem`)** — `mem search "query" [--since DATE]` · `mem session <id> [--around <hit>]` · `mem sessions` (list/map). Later: `mem describe` / `mem expand` (Layer D).
 3. **DAG builder** (Phase 2) — LCM-style hierarchical summarizer (cf. MIT-licensed lossless-claw as prior art). Leaf summaries via Anthropic Agent SDK on a small model; upper layers on a mid model. Hard stop at plan limits; never enables overage billing.
 4. **Summary quality guard ("flinch-detector", REQUIRED):** per-summary checks before acceptance — (a) compression-ratio outlier vs corpus baseline; (b) evasion-marker heuristics in summary text; (c) coverage probe (source proper-noun survival rate). Flagged → re-run on a larger model; twice-flagged → marked for manual summarization. Rationale: small-model refusal/sanitization tendencies must not silently degrade coverage of difficult source material.
 
@@ -29,7 +29,7 @@ A DAG of hierarchical summaries (leaf = session-chunk → session → month). Na
 ## Phases
 
 - **P0:** schema recon (operator-side, informs the fixture generator) → `fixtures/README.md` documents the JSONL shape.
-- **P1:** fixture generator + ingest + FTS + `mem` CLI + tests. Deliverable: standalone-useful search.
+- **P1:** fixture generator + ingest + FTS + `embers` CLI (alias `mem`) + tests. Deliverable: standalone-useful search.
 - **P2:** DAG builder + quality guard, exercised on fixtures; operator runs against real corpus locally.
 - **P3:** full-corpus runs + an in-session usage guide. Operator-side.
 

@@ -1,19 +1,19 @@
-"""`mem` -- bash-friendly CLI over the archive.
+"""`embers` (alias `mem`) -- bash-friendly CLI over the archive.
 
-    mem ingest <root>... [--index DIR] [--rebuild]
-    mem search "query" [--class human,assistant,thinking] [--window N] [--since DATE] [--until DATE] [--limit N]
-    mem session <id> [--around <hit>] [--context N] [--thread] [--class ...] [--full]
-    mem sessions [--since DATE] [--limit N]
-    mem windows [--index DIR]
-    mem stats
-    mem build [--level leaf|session|thread|month|all] [--thread ID] [--backend stub|anthropic] [--budget-usd N]
+    embers ingest <root>... [--index DIR] [--rebuild]
+    embers search "query" [--class human,assistant,thinking] [--window N] [--since DATE] [--until DATE] [--limit N]
+    embers session <id> [--around <hit>] [--context N] [--thread] [--class ...] [--full]
+    embers sessions [--since DATE] [--limit N]
+    embers windows [--index DIR]
+    embers stats
+    embers build [--level leaf|session|thread|month|all] [--thread ID] [--backend stub|anthropic] [--budget-usd N]
               [--dry-run] [--limit N] [--chunk-bytes N] [--workers N]
               [--rerun-model-leaf M] [--rerun-model-upper M]
-    mem describe <session-id | window N | wN | N | thread ID | node ID>
-    mem expand <node ID> [--full]
-    mem grep "query" [--level ...] [--limit N]
-    mem flags [--status flagged|manual] [--export DIR]
-    mem manual <node ID> (--text "..." | --file PATH | --stdin)      |   mem manual --import DIR
+    embers describe <session-id | window N | wN | N | thread ID | node ID>
+    embers expand <node ID> [--full]
+    embers grep "query" [--level ...] [--limit N]
+    embers flags [--status flagged|manual] [--export DIR]
+    embers manual <node ID> (--text "..." | --file PATH | --stdin)      |   embers manual --import DIR
 
 Global: --db PATH (or $MEM_DB; default ~/.memory-archive/mem.db), --json (machine output, one JSON per line).
 """
@@ -179,7 +179,7 @@ def _fmt_block(b: sqlite3.Row, marker: str = " ", width: int = 110, full: bool =
 
 
 def _block_line(b: sqlite3.Row, marker: str = " ", full: bool = False) -> str:
-    """One rendered block line, as `mem session` prints it (also used by `mem expand` on a leaf)."""
+    """One rendered block line, as `embers session` prints it (also used by `embers expand` on a leaf)."""
     stamp = _date(b["ts"], True)[11:] if b["ts"] else "        "
     return "%s #%-7d %s L%-5d %s" % (marker, b["id"], stamp, b["line_no"], _fmt_block(b, marker="", full=full).lstrip())
 
@@ -385,7 +385,7 @@ def cmd_windows(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
         """SELECT w.*, s.n_messages AS n_messages, s.first_ts AS first_ts, s.last_ts AS last_ts, s.thread_id AS thread_id
            FROM windows w LEFT JOIN sessions s ON s.session_id = w.session_id""").fetchall()
     if not rows and not a.json:
-        print("no window map: run `mem ingest --index DIR` or `mem windows --index DIR`")
+        print("no window map: run `embers ingest --index DIR` or `embers windows --index DIR`")
         return 1
     # sort by date (createdAt, else the session's first message), then window number
     dated = []
@@ -476,7 +476,7 @@ def _need_nodes(conn: sqlite3.Connection) -> bool:
     if ok:
         ok = conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone() is not None
     if not ok:
-        sys.stderr.write("no summaries yet: run `mem build` first\n")
+        sys.stderr.write("no summaries yet: run `embers build` first\n")
     return ok
 
 
@@ -507,10 +507,10 @@ def _resolve_node(conn: sqlite3.Connection, words: List[str]) -> sqlite3.Row:
     if m:
         words = ["window", m.group(1)]
     if not words:
-        raise SystemExit("usage: mem describe <session-id | window N | thread ID | node ID>")
+        raise SystemExit("usage: embers describe <session-id | window N | thread ID | node ID>")
     kind, val = (None, words[0]) if len(words) == 1 else (words[0], words[1])
     if len(words) > 2 or (kind is not None and kind not in ("window", "session", "thread", "node")):
-        raise SystemExit("usage: mem describe <session-id | window N | thread ID | node ID>")
+        raise SystemExit("usage: embers describe <session-id | window N | thread ID | node ID>")
 
     def by_node() -> Optional[sqlite3.Row]:
         rows = conn.execute("SELECT * FROM nodes WHERE id = ? OR id LIKE ? ORDER BY id", (val, val + "%")).fetchall()
@@ -543,7 +543,7 @@ def _resolve_node(conn: sqlite3.Connection, words: List[str]) -> sqlite3.Row:
         n = fn()
         if n is not None:
             return n
-    raise SystemExit("no summary node for %s (run `mem build`?)" % " ".join(words))
+    raise SystemExit("no summary node for %s (run `embers build`?)" % " ".join(words))
 
 
 def cmd_describe(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
@@ -582,7 +582,7 @@ def cmd_describe(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
         for k in kids:
             print("  " + _node_line(k))
     elif leaf_msgs:
-        print("prompts in this leaf (mem expand %s for the raw messages):" % n["id"])
+        print("prompts in this leaf (embers expand %s for the raw messages):" % n["id"])
         for m in leaf_msgs:
             print("  %s  %s" % (_date(m["ts"], True)[11:], _one_line(m["text"], 100)))
     return 0
@@ -669,7 +669,7 @@ def _explain(report: Dict[str, Any]) -> List[str]:
 
 def cmd_flags(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'nodes'").fetchone() is None:
-        sys.stderr.write("no summaries yet: run `mem build` first\n")
+        sys.stderr.write("no summaries yet: run `embers build` first\n")
         return 1
     statuses = [a.status] if a.status else ["flagged", "manual"]
     rows = conn.execute("SELECT * FROM nodes WHERE status IN (%s) ORDER BY status, level, COALESCE(first_ts, ''), id" %
@@ -698,7 +698,7 @@ def cmd_flags(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
 
 def _export_flags(conn: sqlite3.Connection, rows: List[sqlite3.Row], a: argparse.Namespace) -> int:
     """One <node-id>.md per node: span, metrics and the raw pack text, so a summary can be written with the
-    source in front of you. Write the summary to <node-id>.summary.md and load it with `mem manual --import DIR`."""
+    source in front of you. Write the summary to <node-id>.summary.md and load it with `embers manual --import DIR`."""
     os.makedirs(a.export, exist_ok=True)
     for n in rows:
         meta = json.loads(n["metrics_json"] or "{}")
@@ -716,7 +716,7 @@ def _export_flags(conn: sqlite3.Connection, rows: List[sqlite3.Row], a: argparse
                   n["summary"] or "(none)", "", "## Source (what the summarizer was shown)", "", "```text",
                   pack.text if pack is not None else "(parts not built yet: " + ", ".join(
                       "%s %s" % (k["id"], k["status"]) for k in children_of(conn, n["id"])) + ")", "```", "",
-                 "Write the summary to %s.summary.md in this directory, then run: mem manual --import %s" % (n["id"], a.export), ""]
+                 "Write the summary to %s.summary.md in this directory, then run: embers manual --import %s" % (n["id"], a.export), ""]
         with open(os.path.join(a.export, n["id"] + ".md"), "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
     if a.json:
@@ -759,7 +759,7 @@ def cmd_manual(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
             jobs.append((_find_node(conn, fn[: -len(".summary.md")]), text))
     else:
         if not a.node:
-            raise SystemExit("usage: mem manual <node ID> (--text TEXT | --file PATH | --stdin)   or   mem manual --import DIR")
+            raise SystemExit("usage: embers manual <node ID> (--text TEXT | --file PATH | --stdin)   or   embers manual --import DIR")
         given = [x for x in (a.text is not None, bool(a.file), a.stdin) if x]
         if len(given) != 1:
             raise SystemExit("give exactly one of --text, --file, --stdin")
@@ -781,7 +781,7 @@ def cmd_manual(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
             print("%s: stored manual summary (%d bytes); was %s" % (node["id"], len(text.strip().encode("utf-8")), node["status"]))
     conn.commit()
     if jobs and not a.json:
-        print("run `mem build` to rebuild the nodes above these that were built over a placeholder")
+        print("run `embers build` to rebuild the nodes above these that were built over a placeholder")
     return 0
 
 
@@ -829,7 +829,7 @@ def cmd_build(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
         for lv, c in res["levels"].items():
             print("  %-8s ok %d  manual %d  not ready %d" % (lv, c["ok"], c["manual"], c["not_ready"]))
         if res["manual"]:
-            print("%d node(s) need manual attention: see `mem flags`" % res["manual"])
+            print("%d node(s) need manual attention: see `embers flags`" % res["manual"])
         if res["stopped"] == "budget":
             print("STOPPED: %s" % res.get("stop_reason"))
         elif res["stopped"] == "limit":
@@ -842,10 +842,10 @@ def cmd_build(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
 # ----------------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="mem", description="memory-archive: search Claude Code transcripts locally.")
+    ap = argparse.ArgumentParser(prog="embers", description="Embers: lossless memory for Claude Code. Search Claude Code transcripts locally.")
     ap.add_argument("--db", default=None, help="SQLite path (default $MEM_DB or ~/.memory-archive/mem.db)")
     ap.add_argument("--json", action="store_true", help="machine-readable output, one JSON object per line")
-    ap.add_argument("--version", action="version", version="mem " + __version__)
+    ap.add_argument("--version", action="version", version="embers " + __version__)
     sub = ap.add_subparsers(dest="cmd", metavar="command")
     sub.required = True
 
@@ -869,7 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("session", help="show a session (id or prefix, window number, or agent-<id>)")
     p.add_argument("id")
-    p.add_argument("--around", type=int, metavar="HIT", help="block id from `mem search`; show context around it")
+    p.add_argument("--around", type=int, metavar="HIT", help="block id from `embers search`; show context around it")
     p.add_argument("--context", type=int, default=20, help="blocks before/after with --around")
     p.add_argument("--thread", action="store_true", help="show the whole logical thread (all stitched files)")
     p.add_argument("--class", dest="cls")
@@ -942,13 +942,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     a = ap.parse_args(argv)
     a.db = a.db or default_db_path()
     if a.cmd != "ingest" and not os.path.exists(a.db) and a.db != ":memory:":
-        sys.stderr.write("no archive at %s (run `mem ingest <root>...` first, or set --db/$MEM_DB)\n" % a.db)
+        sys.stderr.write("no archive at %s (run `embers ingest <root>...` first, or set --db/$MEM_DB)\n" % a.db)
         return 2
     conn = open_db(a.db)
     try:
         return a.fn(conn, a)
     except BrokenPipeError:
-        # `mem … | head` closed the pipe: exit quietly like a well-behaved unix tool
+        # `embers … | head` closed the pipe: exit quietly like a well-behaved unix tool
         try:
             sys.stdout.close()
         except Exception:

@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from memarchive.cli import main
+from embers.cli import main
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -197,7 +197,7 @@ def test_stats(capsys, dbpath, corpus):
 
 def test_missing_db_message(capsys, tmp_path):
     code, out, err = run(capsys, "--db", str(tmp_path / "nope.db"), "stats")
-    assert code == 2 and "mem ingest" in err
+    assert code == 2 and "embers ingest" in err
 
 
 def test_script_entry_point_end_to_end(corpus, tmp_path):
@@ -213,4 +213,4 @@ def test_script_entry_point_end_to_end(corpus, tmp_path):
     r = subprocess.run([sys.executable, mem, "windows"], capture_output=True, text=True, env=env, cwd=REPO)
     assert r.returncode == 0 and r.stdout.startswith("w1 ")
     r = subprocess.run([sys.executable, mem, "--version"], capture_output=True, text=True, env=env, cwd=REPO)
-    assert r.returncode == 0 and r.stdout.startswith("mem ")
+    assert r.returncode == 0 and r.stdout.startswith("embers ")

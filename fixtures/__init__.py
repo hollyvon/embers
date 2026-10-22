@@ -1,1 +1,1 @@
-"""Synthetic fixture corpus for memory-archive. Everything here is invented; no real transcript data."""
+"""Synthetic fixture corpus for Embers. Everything here is invented; no real transcript data."""

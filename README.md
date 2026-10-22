@@ -40,13 +40,13 @@ The database lives at `~/.memory-archive/mem.db` (override with `--db` or `$MEM_
 | Path | Purpose |
 |---|---|
 | `fixtures/gen.py` | Seeded synthetic corpus generator (P0 §f): two roots, all 15 record types, compaction, resume chains, subagents, edge cases, `sessions-index/`, `truth.json`. `--legacy-summary` adds legacy summary records. |
-| `memarchive/records.py` | Pure record logic: block extraction and classes, the human-prompt predicate. |
-| `memarchive/ingest.py` | Incremental ingester, stitching, SQLite schema + FTS5. |
-| `memarchive/dag.py` | Layer D storage: node tables, leaf chunking, session/thread/month structure, staleness sync. |
-| `memarchive/build.py` | Prompt packs and the build loop (summarizer -> flinch detector -> accept / rerun / manual), the worker pool, manual entry. |
-| `memarchive/summarize.py` | `Summarizer` interface, offline `StubSummarizer`, budget-capped `AnthropicSummarizer`. |
-| `memarchive/flinch.py` | The summary-quality guard (three checks, `Thresholds`, `EVASION_MARKERS`). |
-| `memarchive/cli.py`, `mem` | The `mem` CLI. |
+| `embers/records.py` | Pure record logic: block extraction and classes, the human-prompt predicate. |
+| `embers/ingest.py` | Incremental ingester, stitching, SQLite schema + FTS5. |
+| `embers/dag.py` | Layer D storage: node tables, leaf chunking, session/thread/month structure, staleness sync. |
+| `embers/build.py` | Prompt packs and the build loop (summarizer -> flinch detector -> accept / rerun / manual), the worker pool, manual entry. |
+| `embers/summarize.py` | `Summarizer` interface, offline `StubSummarizer`, budget-capped `AnthropicSummarizer`. |
+| `embers/flinch.py` | The summary-quality guard (three checks, `Thresholds`, `EVASION_MARKERS`). |
+| `embers/cli.py`, `mem` | The `mem` CLI. |
 | `tests/` | pytest suite run against the generated fixtures. |
 | `tools/schema_probe.py` | P0 reconnaissance probe (operator-side). |
 
@@ -96,7 +96,7 @@ mem build --all --backend anthropic --budget-usd 5
 ```
 
 - `--budget-usd` is mandatory for this backend (or `$MEM_BUDGET_USD`). Before every call the cost is estimated from the prompt size plus the maximum output; a call that could push spend past the budget is not made, the build stops cleanly (exit code 3), and the next run continues from there. Spend is computed from reported token usage. Nothing here enables overage; if you want a hard ceiling at the account level, set that in your Anthropic console too.
-- Two tiers: `small` for leaves, `mid` for session/thread/month nodes. Defaults are `claude-haiku-5-5` and `claude-sonnet-5-5`; override with `$MEM_MODEL_SMALL` / `$MEM_MODEL_MID`. The rerun tier is configured per level, see "Reruns, refusals" below. Prices for the cost estimate live in `PRICES` in `memarchive/summarize.py`; an unlisted model is priced conservatively.
+- Two tiers: `small` for leaves, `mid` for session/thread/month nodes. Defaults are `claude-haiku-5-5` and `claude-sonnet-5-5`; override with `$MEM_MODEL_SMALL` / `$MEM_MODEL_MID`. The rerun tier is configured per level, see "Reruns, refusals" below. Prices for the cost estimate live in `PRICES` in `embers/summarize.py`; an unlisted model is priced conservatively.
 - A user-scoped key (`sk-ant-usr…`) must name a workspace on every call: set `$MEM_WORKSPACE_ID` to the workspace id (`wrkspc_…`, from the Console under Settings → Workspaces) and the backend sends it as the `anthropic-workspace-id` header. Workspace-scoped keys need nothing extra.
 - The SDK's own two retries apply; the tool adds none. Select the backend with `--backend` or `$MEM_BACKEND` (default `stub`).
 - The tests and the cloud never call this backend.
@@ -151,7 +151,7 @@ mem build                                           # rebuilds the nodes above t
 
 ### The flinch detector
 
-Small models sometimes refuse, soften or skip difficult source material instead of summarizing it. Every summary, from any backend, passes three independent checks before it is accepted (`memarchive/flinch.py`; all numbers in one `Thresholds` dataclass):
+Small models sometimes refuse, soften or skip difficult source material instead of summarizing it. Every summary, from any backend, passes three independent checks before it is accepted (`embers/flinch.py`; all numbers in one `Thresholds` dataclass):
 
 | Check | Fails when |
 |---|---|

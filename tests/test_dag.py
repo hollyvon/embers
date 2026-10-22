@@ -5,11 +5,11 @@ import shutil
 
 import pytest
 
-from memarchive import dag
-from memarchive.build import BuildOptions, children_of, make_pack, run_build
-from memarchive.dag import Msg, chunk_session, plan_chunks
-from memarchive.ingest import Ingester, open_db
-from memarchive.summarize import StubSummarizer
+from embers import dag
+from embers.build import BuildOptions, children_of, make_pack, run_build
+from embers.dag import Msg, chunk_session, plan_chunks
+from embers.ingest import Ingester, open_db
+from embers.summarize import StubSummarizer
 from conftest import SMALL_THREAD, fresh_conn
 
 

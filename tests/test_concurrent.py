@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from memarchive.build import BuildOptions, run_build
-from memarchive.summarize import AnthropicSummarizer, BudgetExceeded, StubSummarizer, SummaryResult, make_summarizer
+from embers.build import BuildOptions, run_build
+from embers.summarize import AnthropicSummarizer, BudgetExceeded, StubSummarizer, SummaryResult, make_summarizer
 from conftest import SMALL_THREAD, fresh_conn
 
 
@@ -154,7 +154,7 @@ class SlowClient:
 
 
 def _pack(n=3000):
-    from memarchive.summarize import PromptPack
+    from embers.summarize import PromptPack
     return PromptPack(level="leaf", text="[human] hello Zorblax\n" * (n // 20), source_bytes=n, proper_nouns=["Zorblax"])
 
 
