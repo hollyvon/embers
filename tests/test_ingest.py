@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 
-from memarchive.ingest import Ingester, discover, open_db
+from embers.ingest import Ingester, discover, open_db
 
 
 def sha(path):

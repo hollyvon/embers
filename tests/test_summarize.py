@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from memarchive.build import BuildOptions, run_build
-from memarchive.summarize import (AnthropicSummarizer, BudgetExceeded, PromptPack, StubSummarizer, make_summarizer)
+from embers.build import BuildOptions, run_build
+from embers.summarize import (AnthropicSummarizer, BudgetExceeded, PromptPack, StubSummarizer, make_summarizer)
 from conftest import SMALL_THREAD, fresh_conn
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -116,7 +116,7 @@ def test_build_stops_cleanly_on_budget_and_resumes_later(corpus, tmp_path):
 
 
 def test_anthropic_package_is_optional_and_never_imported_by_the_stub_path():
-    code = ("import sys; sys.path.insert(0, %r); import memarchive.cli, memarchive.build; from memarchive.summarize import make_summarizer; "
+    code = ("import sys; sys.path.insert(0, %r); import embers.cli, embers.build; from embers.summarize import make_summarizer; "
             "make_summarizer('stub'); assert 'anthropic' not in sys.modules") % REPO
     r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr

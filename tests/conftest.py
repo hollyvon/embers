@@ -5,7 +5,7 @@ import os
 import pytest
 
 from fixtures.gen import generate
-from memarchive.ingest import Ingester, open_db
+from embers.ingest import Ingester, open_db
 
 ROOTS = ("root1", "root2")
 
@@ -84,8 +84,8 @@ def fresh_conn(corpus, tmp_path, name="mem.db"):
 @pytest.fixture(scope="session")
 def built(corpus, tmp_path_factory):
     """The whole fixture corpus summarized with the stub backend."""
-    from memarchive.build import BuildOptions, run_build
-    from memarchive.summarize import StubSummarizer
+    from embers.build import BuildOptions, run_build
+    from embers.summarize import StubSummarizer
     path = tmp_path_factory.mktemp("built") / "mem.db"
     conn = open_db(str(path))
     Ingester(conn).ingest(corpus.roots, index_dir=corpus.index)

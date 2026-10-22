@@ -3,10 +3,10 @@ import sqlite3
 
 import pytest
 
-from memarchive import flinch
-from memarchive.flinch import (Baseline, Thresholds, baseline_for_level, check_coverage, check_evasion, check_ratio,
+from embers import flinch
+from embers.flinch import (Baseline, Thresholds, baseline_for_level, check_coverage, check_evasion, check_ratio,
                                evaluate, extract_proper_nouns)
-from memarchive.summarize import PromptPack, StubSummarizer
+from embers.summarize import PromptPack, StubSummarizer
 
 T = Thresholds()
 
@@ -39,7 +39,7 @@ def test_ratio_uses_db_baseline_only_from_twenty_nodes():
 
 def test_baseline_for_level_median_and_iqr():
     c = sqlite3.connect(":memory:")
-    from memarchive.dag import ensure_schema
+    from embers.dag import ensure_schema
     ensure_schema(c)
     assert baseline_for_level(c, "leaf") is None
     for i in range(1, 22):
@@ -126,7 +126,7 @@ def test_normal_stub_passes_on_the_same_pack():
 
 def test_quoted_marker_is_not_evasion():
     """A marker the summary quotes from the source is reported as quoted and does not fail the check."""
-    from memarchive.flinch import check_evasion, Thresholds
+    from embers.flinch import check_evasion, Thresholds
     t = Thresholds()
     src = "Then the assistant said: honestly, I can't verify that from inside. They moved on."
     quoting = "- The assistant admitted \"I can't verify that from inside\"; the pair moved on."

@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from memarchive.cli import _created_date, main
+from embers.cli import _created_date, main
 from conftest import SMALL_THREAD
 
 
@@ -25,9 +25,9 @@ def dbpath(corpus, tmp_path):
 
 def make_manual(dbpath, capsys, n=2):
     """Build the small thread with an always-flinching stub so its leaves end up `manual`."""
-    from memarchive.build import BuildOptions, run_build
-    from memarchive.ingest import open_db
-    from memarchive.summarize import StubSummarizer
+    from embers.build import BuildOptions, run_build
+    from embers.ingest import open_db
+    from embers.summarize import StubSummarizer
     conn = open_db(dbpath)
     tid = conn.execute("SELECT thread_id FROM threads WHERE thread_id LIKE ?", (SMALL_THREAD + "%",)).fetchone()[0]
     run_build(conn, StubSummarizer(flinch=True), BuildOptions(thread_ids=[tid]))

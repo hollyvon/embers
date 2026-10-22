@@ -1,8 +1,8 @@
 """Record classification: the human-prompt predicate (P0 §d.4) and block extraction."""
 import pytest
 
-from memarchive.ingest import parse_window
-from memarchive.records import extract_blocks, is_human_prompt, opener_kind
+from embers.ingest import parse_window
+from embers.records import extract_blocks, is_human_prompt, opener_kind
 
 
 def user(content, **extra):
@@ -190,7 +190,7 @@ def test_lone_surrogates_are_sanitized(tmp_path):
     cannot store. sanitize() must replace it and leave valid text (incl. full emoji) alone."""
     import json
     import sqlite3
-    from memarchive.records import sanitize
+    from embers.records import sanitize
 
     raw = b'{"type":"last-prompt","lastPrompt":"abc \\ud83d","nested":{"ok":"\\ud83d\\ude00 fine","xs":["\\udc00"]}}'
     rec = json.loads(raw)

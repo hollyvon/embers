@@ -3,9 +3,11 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memory-archive"
-version = "0.1.0"
-description = "Local-first SQLite/FTS5 archive over Claude Code session transcripts"
+name = "embers-memory"
+version = "0.2.0"
+description = "Embers: lossless memory for Claude Code. Local SQLite/FTS5 archive over session transcripts."
+license = {text = "MIT"}
+authors = [{name = "Holly Wren von Heidereich"}]
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
@@ -15,10 +17,17 @@ dev = ["pytest>=7"]
 anthropic = ["anthropic"]
 
 [project.scripts]
-mem = "memarchive.cli:main"
+embers = "embers.cli:main"
+mem = "embers.cli:main"
 
 [tool.setuptools]
-packages = ["memarchive"]
+packages = ["embers", "embers.skill"]
+
+[tool.setuptools.package-dir]
+"embers.skill" = "skills/embers"
+
+[tool.setuptools.package-data]
+"embers.skill" = ["SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

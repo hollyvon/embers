@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from memarchive.cli import main
+from embers.cli import main
 from conftest import SMALL_THREAD
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,7 +32,7 @@ def dbpath(corpus, tmp_path_factory):
 def test_commands_need_a_build_first(capsys, dbpath):
     for cmd in (["describe", "node", "x"], ["expand", "x"], ["grep", "foo"], ["flags"]):
         code, out, err = run(capsys, "--db", dbpath, *cmd)
-        assert code == 1 and "mem build" in err
+        assert code == 1 and "embers build" in err
 
 
 def test_build_dry_run_then_real_build(capsys, dbpath):
@@ -121,9 +121,9 @@ def test_flags_lists_manual_nodes_with_metric_breakdown(capsys, corpus, tmp_path
     assert main(["--db", p, "ingest", "--index", corpus.index] + corpus.roots) == 0
     capsys.readouterr()
     # make the stub flinch through the CLI path
-    import memarchive.summarize as sm
+    import embers.summarize as sm
     monkeypatch.setattr(sm, "make_summarizer", lambda *a, **k: sm.StubSummarizer(flinch=True))
-    monkeypatch.setattr("memarchive.cli.make_summarizer", lambda *a, **k: sm.StubSummarizer(flinch=True))
+    monkeypatch.setattr("embers.cli.make_summarizer", lambda *a, **k: sm.StubSummarizer(flinch=True))
     code, out, _ = run(capsys, "--db", p, "build", "--level", "leaf", "--thread", SMALL_THREAD)
     assert code == 0 and "need manual attention" in out
     code, out, _ = run(capsys, "--db", p, "flags", "--status", "manual")
