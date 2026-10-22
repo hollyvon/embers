@@ -1,11 +1,13 @@
 """`embers` (alias `mem`) -- bash-friendly CLI over the archive.
 
-    embers ingest <root>... [--index DIR] [--rebuild]
+    embers ingest [<root>...] [--index DIR] [--rebuild]
     embers search "query" [--class human,assistant,thinking] [--window N] [--since DATE] [--until DATE] [--limit N]
     embers session <id> [--around <hit>] [--context N] [--thread] [--class ...] [--full]
     embers sessions [--since DATE] [--limit N]
     embers windows [--index DIR]
     embers stats
+    embers detect
+    embers install-skill [--force] [--dest DIR]
     embers build [--level leaf|session|thread|month|all] [--thread ID] [--backend stub|anthropic] [--budget-usd N]
               [--dry-run] [--limit N] [--chunk-bytes N] [--workers N]
               [--rerun-model-leaf M] [--rerun-model-upper M]
@@ -30,6 +32,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from . import __version__
 from . import dag
+from . import detect as _detect
+from . import skillinstall
 from .build import BuildOptions, children_of, make_pack, run_build, set_manual_summary
 from .ingest import Ingester, default_db_path, open_db
 from .summarize import make_summarizer
@@ -188,7 +192,11 @@ def _block_line(b: sqlite3.Row, marker: str = " ", full: bool = False) -> str:
 
 def cmd_ingest(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
     log = (lambda s: sys.stderr.write(s + "\n")) if a.verbose else None
-    stats = Ingester(conn, verbose=a.verbose, log=log).ingest(a.roots, index_dir=a.index, rebuild=a.rebuild)
+    roots = a.roots or _detect.detected_paths()
+    if not roots:
+        sys.stderr.write("no roots given and no known transcript root found (try `embers detect`, or `embers ingest ROOT...`)\n")
+        return 2
+    stats = Ingester(conn, verbose=a.verbose, log=log).ingest(roots, index_dir=a.index, rebuild=a.rebuild)
     if a.json:
         _emit(dict(stats))
     else:
@@ -198,6 +206,37 @@ def cmd_ingest(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
                   stats.get("files_unchanged", 0), stats.get("lines_parsed", 0), stats.get("bad_lines", 0),
                   stats.get("messages_new", 0), stats.get("messages_dup", 0), stats.get("blocks_new", 0),
                   stats.get("sessions", 0), stats.get("threads", 0), stats.get("seconds", 0)))
+    return 0
+
+
+def cmd_detect(conn: Optional[sqlite3.Connection], a: argparse.Namespace) -> int:
+    found = _detect.detect()
+    if a.json:
+        for e in found:
+            _emit(dict(e))
+    elif not found:
+        print("no transcript roots found (looked for: %s)" % ", ".join("%s at %s" % (n, g) for n, g in _detect.KNOWN_ROOTS))
+    else:
+        for e in found:
+            print("%s: %s  (%d project dir(s), ~%d session(s), %d subagent file(s))" % (
+                e["name"], e["path"], e["projects"], e["sessions"], e["subagents"]))
+        print("nothing was read or ingested; run `embers ingest` to build the archive")
+    return 0 if found else 1
+
+
+def cmd_install_skill(conn: Optional[sqlite3.Connection], a: argparse.Namespace) -> int:
+    try:
+        target = skillinstall.install(dest=a.dest, force=a.force)
+    except FileExistsError as e:
+        sys.stderr.write("%s already exists; pass --force to overwrite it\n" % e)
+        return 1
+    except FileNotFoundError as e:
+        sys.stderr.write("%s\n" % e)
+        return 1
+    if a.json:
+        _emit({"installed": target})
+    else:
+        print("installed skill: %s" % target)
     return 0
 
 
@@ -850,11 +889,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.required = True
 
     p = sub.add_parser("ingest", help="ingest one or more transcript roots (incremental)")
-    p.add_argument("roots", nargs="+", metavar="root")
+    p.add_argument("roots", nargs="*", metavar="root", help="transcript roots (default: the roots `embers detect` finds)")
     p.add_argument("--index", help="sessions-index directory (per-session metadata JSONs) for the window map")
     p.add_argument("--rebuild", action="store_true", help="re-parse every file even if unchanged")
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(fn=cmd_ingest)
+
+    p = sub.add_parser("detect", help="find known transcript roots and count sessions; reads nothing, ingests nothing")
+    p.set_defaults(fn=cmd_detect, nodb=True)
+
+    p = sub.add_parser("install-skill", help="copy the bundled Claude Code skill to ~/.claude/skills/embers/")
+    p.add_argument("--force", action="store_true", help="overwrite an existing install")
+    p.add_argument("--dest", metavar="DIR", help="install into DIR instead of ~/.claude/skills/embers")
+    p.set_defaults(fn=cmd_install_skill, nodb=True)
 
     p = sub.add_parser("search", help="full-text search (FTS5 syntax; falls back to a phrase)")
     p.add_argument("query")
@@ -940,6 +987,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = build_parser()
     a = ap.parse_args(argv)
+    if getattr(a, "nodb", False):
+        return a.fn(None, a)          # detect / install-skill never touch the archive
     a.db = a.db or default_db_path()
     if a.cmd != "ingest" and not os.path.exists(a.db) and a.db != ":memory:":
         sys.stderr.write("no archive at %s (run `embers ingest <root>...` first, or set --db/$MEM_DB)\n" % a.db)

@@ -21,7 +21,13 @@ embers = "embers.cli:main"
 mem = "embers.cli:main"
 
 [tool.setuptools]
-packages = ["embers"]
+packages = ["embers", "embers.skill"]
+
+[tool.setuptools.package-dir]
+"embers.skill" = "skills/embers"
+
+[tool.setuptools.package-data]
+"embers.skill" = ["SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

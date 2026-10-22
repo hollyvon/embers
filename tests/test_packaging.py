@@ -23,4 +23,4 @@ def test_both_console_scripts_point_at_one_entry():
     text = _pyproject()
     assert re.search(r'^embers = "embers\.cli:main"$', text, re.M)
     assert re.search(r'^mem = "embers\.cli:main"$', text, re.M)
-    assert 'packages = ["embers"]' in text
+    assert 'packages = ["embers", "embers.skill"]' in text

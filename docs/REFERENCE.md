@@ -155,7 +155,7 @@ Small models sometimes refuse, soften or skip difficult source material instead 
 
 | Check | Fails when |
 |---|---|
-| `ratio` | summary bytes / source bytes is outside the fences. Fences come from the median and IQR of already accepted nodes of the same level once at least 20 exist (before that, fixed defaults). A summary far shorter than the baseline is the classic evasion signature. Sources under 1.5 KB are not tested; an empty summary always fails. |
+| `ratio` | summary bytes / source bytes is outside the fences. Fences come from the median and IQR of already accepted nodes of the same level once at least 20 exist (before that, fixed defaults). A summary far shorter than the baseline is the classic evasion signature. Sources under 3 KB are not tested; an empty summary always fails. |
 | `evasion` | the text contains any phrase in `EVASION_MARKERS` (case-insensitive: "I can't", "as an AI", "sensitive", "let's focus on", "omitted", ...). Extend the tuple in `flinch.py`; ordinary compounds such as "case-sensitive" are exempt via `EVASION_BENIGN`. |
 | `coverage` | fewer than 60% of the source's 30 most frequent proper nouns (capitalized words mid-sentence, ALL-CAPS tokens of 3+ characters, camelCase) appear in the summary. |
 
