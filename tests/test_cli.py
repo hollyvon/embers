@@ -214,3 +214,12 @@ def test_script_entry_point_end_to_end(corpus, tmp_path):
     assert r.returncode == 0 and r.stdout.startswith("w1 ")
     r = subprocess.run([sys.executable, mem, "--version"], capture_output=True, text=True, env=env, cwd=REPO)
     assert r.returncode == 0 and r.stdout.startswith("embers ")
+
+
+def test_version_flag_on_both_names(capsys):
+    """`embers --version` prints the package version; the `mem` alias shares the same entry point."""
+    import embers
+    with pytest.raises(SystemExit) as e:
+        main(["--version"])
+    assert e.value.code == 0
+    assert capsys.readouterr().out.strip() == "embers " + embers.__version__
