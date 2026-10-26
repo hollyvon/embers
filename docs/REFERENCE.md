@@ -89,7 +89,7 @@ embers flags                           # flagged / manual nodes with their detec
 ### Point it at the real backend (on your machine)
 
 ```bash
-pip install anthropic                       # optional dependency, imported only by this backend
+pip install 'anthropic>=0.125'              # optional dependency, imported only by this backend; older SDKs reject output_config
 export ANTHROPIC_API_KEY=...                # set in your shell; the tool never stores or logs it
 embers build --all --backend anthropic --budget-usd 5 --dry-run   # estimate first
 embers build --all --backend anthropic --budget-usd 5

@@ -14,7 +14,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
-anthropic = ["anthropic"]
+anthropic = ["anthropic>=0.125"]   # output_config/effort; tested with 0.125.0
 
 [project.scripts]
 embers = "embers.cli:main"

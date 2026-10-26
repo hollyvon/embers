@@ -738,7 +738,11 @@ def cmd_flags(conn: sqlite3.Connection, a: argparse.Namespace) -> int:
 def _export_flags(conn: sqlite3.Connection, rows: List[sqlite3.Row], a: argparse.Namespace) -> int:
     """One <node-id>.md per node: span, metrics and the raw pack text, so a summary can be written with the
     source in front of you. Write the summary to <node-id>.summary.md and load it with `embers manual --import DIR`."""
-    os.makedirs(a.export, exist_ok=True)
+    os.makedirs(a.export, mode=0o700, exist_ok=True)   # raw source excerpts: owner-only
+    try:
+        os.chmod(a.export, 0o700)
+    except OSError:
+        pass
     for n in rows:
         meta = json.loads(n["metrics_json"] or "{}")
         report = meta.get("report") or {}
@@ -756,7 +760,8 @@ def _export_flags(conn: sqlite3.Connection, rows: List[sqlite3.Row], a: argparse
                   pack.text if pack is not None else "(parts not built yet: " + ", ".join(
                       "%s %s" % (k["id"], k["status"]) for k in children_of(conn, n["id"])) + ")", "```", "",
                  "Write the summary to %s.summary.md in this directory, then run: embers manual --import %s" % (n["id"], a.export), ""]
-        with open(os.path.join(a.export, n["id"] + ".md"), "w", encoding="utf-8") as f:
+        out_path = os.path.join(a.export, n["id"] + ".md")
+        with open(os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
     if a.json:
         _emit({"exported": len(rows), "dir": a.export})

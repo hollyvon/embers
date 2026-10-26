@@ -9,3 +9,16 @@ build/
 dist/
 /out/
 /fx/
+*.db-shm
+*.sqlite
+*.sqlite-*
+*.sqlite3
+db/
+.env
+run.env
+*.jsonl
+P0-schema-report.json
+schema_probe_report.json
+.venv/
+venv/
+.DS_Store
