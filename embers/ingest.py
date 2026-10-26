@@ -185,7 +185,7 @@ def open_db(path: str) -> sqlite3.Connection:
     if path != ":memory:":
         d = os.path.dirname(os.path.abspath(path))
         if d:
-            os.makedirs(d, exist_ok=True)
+            os.makedirs(d, mode=0o700, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -194,7 +194,22 @@ def open_db(path: str) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
     conn.commit()
+    if path != ":memory:":
+        _make_private(path)
     return conn
+
+
+def _make_private(db_path: str) -> None:
+    """The archive holds private conversations: owner-only permissions on the directory and every DB file
+    (the -wal/-shm side files included). Best effort; platforms without POSIX modes are left alone."""
+    d = os.path.dirname(os.path.abspath(db_path))
+    for target, mode in [(d, 0o700), (db_path, 0o600), (db_path + "-wal", 0o600), (db_path + "-shm", 0o600),
+                         (db_path + "-journal", 0o600)]:
+        try:
+            if target and os.path.exists(target):
+                os.chmod(target, mode)
+        except OSError:
+            pass
 
 
 # ----------------------------------------------------------------------------- file discovery

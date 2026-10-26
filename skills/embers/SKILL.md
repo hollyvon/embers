@@ -98,7 +98,7 @@ embers build --all --backend stub         # offline extractive stand-in. No netw
 For real summaries, use the Anthropic backend on the user's machine:
 
 ```bash
-pip install 'embers-memory[anthropic]'
+pip install 'embers-memory[anthropic]'    # pulls anthropic>=0.125; the backend passes output_config, which older SDKs reject
 export ANTHROPIC_API_KEY=...              # the user sets this in their own shell. Never print or store it.
 embers build --all --backend anthropic --budget-usd 5 --dry-run   # estimate first
 embers build --all --backend anthropic --budget-usd 5
